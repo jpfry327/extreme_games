@@ -1,5 +1,5 @@
 import { TICK_DT } from "../config";
-import type { InputCommand } from "./types";
+import type { StepContext } from "./types";
 import type { World } from "./world";
 
 /**
@@ -10,6 +10,9 @@ import type { World } from "./world";
  *
  * `advance()` returns an interpolation alpha in [0,1): how far we are between the
  * last completed tick and the next one, so the renderer can smoothly blend poses.
+ *
+ * The same `StepContext` is applied to every tick we run this frame — the client
+ * sampled input once for the frame, and all the catch-up ticks share that intent.
  */
 export class FixedLoop {
   private accumulator = 0;
@@ -17,11 +20,11 @@ export class FixedLoop {
 
   constructor(private readonly world: World) {}
 
-  advance(dtSeconds: number, input: InputCommand): number {
+  advance(dtSeconds: number, ctx: StepContext): number {
     this.accumulator += Math.min(dtSeconds, FixedLoop.MAX_FRAME);
 
     while (this.accumulator >= TICK_DT) {
-      this.world.step(input);
+      this.world.step(ctx);
       this.accumulator -= TICK_DT;
     }
 

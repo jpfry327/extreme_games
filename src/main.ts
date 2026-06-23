@@ -45,8 +45,12 @@ async function main() {
     const dt = (now - last) / 1000;
     last = now;
 
+    // Sample this frame's intent and address it to the local player. The
+    // sim is multiplayer-shaped: it steps from a map of per-player inputs, even
+    // though there's only one player today.
     const input = keyboard.sample();
-    const alpha = loop.advance(dt, input);
+    const ctx = { inputs: new Map([[world.localPlayerId, input]]) };
+    const alpha = loop.advance(dt, ctx);
     renderer.draw(world, alpha, dt);
 
     // HUD (updated a few times a second).
@@ -57,13 +61,13 @@ async function main() {
       fpsAccum = 0;
       fpsFrames = 0;
     }
-    const s = world.ship;
-    const speed = Math.hypot(s.vx, s.vy);
+    const k = world.localPlayer.kinematics;
+    const speed = Math.hypot(k.vx, k.vy);
     hud.textContent =
       `fps ${fps}  (sim ${TICK_HZ}Hz)\n` +
-      `pos ${s.x.toFixed(0)}, ${s.y.toFixed(0)}\n` +
+      `pos ${k.x.toFixed(0)}, ${k.y.toFixed(0)}\n` +
       `speed ${speed.toFixed(2)} px/tick\n` +
-      `energy ${s.energy.toFixed(0)}\n` +
+      `energy ${world.localPlayer.resources.energy.toFixed(0)}\n` +
       `projectiles ${world.projectiles.length}`;
 
     requestAnimationFrame(frame);

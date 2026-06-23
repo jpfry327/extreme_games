@@ -1,8 +1,8 @@
 import { Application, Container, Sprite, Texture } from "pixi.js";
 import { ASSETS } from "../assets";
-import { SHIP } from "../config";
+import { shipConfig } from "../config";
 import type { GameMap } from "../sim/gamemap";
-import type { Projectile } from "../sim/types";
+import type { Player, Projectile } from "../sim/types";
 import type { World } from "../sim/world";
 import { EffectsLayer } from "./effects";
 import { loadSheet } from "./textures";
@@ -29,10 +29,12 @@ export class Renderer {
 
   private world!: Container; // camera-moved container holding everything
   private tiles!: TileLayer;
-  private shipSprite!: Sprite;
+  private shipLayer!: Container;
+  private projectileLayer!: Container;
   private shipFrames!: Texture[];
   private bulletFrames!: Texture[];
   private bombFrames!: Texture[];
+  private shipPool: Sprite[] = [];
   private projectilePool: Sprite[] = [];
 
   // Cosmetic effects, split into two layers so trails sit behind the bomb and
@@ -70,13 +72,16 @@ export class Renderer {
     this.tiles = new TileLayer(tilesetFrames, map);
     this.world.addChild(this.tiles.container);
 
-    // Trail puffs render above the tiles but below the ship and projectiles.
+    // Trail puffs render above the tiles but below the ships and projectiles.
     this.trails = new EffectsLayer();
     this.world.addChild(this.trails.container);
 
-    this.shipSprite = new Sprite(this.shipFrames[0]);
-    this.shipSprite.anchor.set(0.5);
-    this.world.addChild(this.shipSprite);
+    // Ships, then projectiles. Both are pooled sprite layers that grow to fit
+    // however many players / shots the world currently holds.
+    this.shipLayer = new Container();
+    this.world.addChild(this.shipLayer);
+    this.projectileLayer = new Container();
+    this.world.addChild(this.projectileLayer);
 
     // Explosions render on top of everything.
     this.bursts = new EffectsLayer();
@@ -92,26 +97,48 @@ export class Renderer {
   draw(world: World, alpha: number, dtSeconds: number): void {
     const sw = this.app.screen.width;
     const sh = this.app.screen.height;
-    const ship = world.ship;
+    const local = world.localPlayer.kinematics;
     this.clockMs += dtSeconds * 1000;
 
-    // Interpolated camera target = where the ship visually is this frame.
-    const camX = lerp(ship.prevX, ship.x, alpha);
-    const camY = lerp(ship.prevY, ship.y, alpha);
+    // Interpolated camera target = where the local player visually is this frame.
+    const camX = lerp(local.prevX, local.x, alpha);
+    const camY = lerp(local.prevY, local.y, alpha);
 
-    // Move the world so the ship sits at screen center (rounded = crisp pixels).
+    // Move the world so the local player sits at screen center (rounded = crisp).
     this.world.x = Math.round(sw / 2 - camX);
     this.world.y = Math.round(sh / 2 - camY);
 
     this.tiles.update(camX, camY, sw, sh);
 
-    // Ship: place at interpolated world pos, pick frame from its facing.
-    this.shipSprite.x = camX;
-    this.shipSprite.y = camY;
-    this.shipSprite.texture = this.shipFrames[directionFrame(ship.rotation)];
-
+    this.drawPlayers(world, alpha);
     this.drawProjectiles(world, alpha);
     this.drawEffects(world, alpha, dtSeconds * 1000);
+  }
+
+  /** Draw every player's ship, growing the sprite pool to fit. Each sprite is
+   *  placed at its interpolated pose and shows the frame for its facing. */
+  private drawPlayers(world: World, alpha: number): void {
+    const players: Player[] = [...world.players.values()];
+    while (this.shipPool.length < players.length) {
+      const s = new Sprite(this.shipFrames[0]);
+      s.anchor.set(0.5);
+      this.shipPool.push(s);
+      this.shipLayer.addChild(s);
+    }
+    for (let i = 0; i < this.shipPool.length; i++) {
+      const s = this.shipPool[i];
+      const p = players[i];
+      if (!p) {
+        s.visible = false;
+        continue;
+      }
+      const k = p.kinematics;
+      const directions = shipConfig(p.shipType).directions;
+      s.visible = true;
+      s.x = lerp(k.prevX, k.x, alpha);
+      s.y = lerp(k.prevY, k.y, alpha);
+      s.texture = this.shipFrames[directionFrame(k.rotation, directions)];
+    }
   }
 
   /** Turn sim bomb-detonation events into explosions, drop trail puffs behind
@@ -150,9 +177,7 @@ export class Renderer {
       const s = new Sprite(this.bulletFrames[0]);
       s.anchor.set(0.5);
       this.projectilePool.push(s);
-      this.world.addChild(s);
-      // Keep explosions drawing above the projectile sprites we just added.
-      this.world.addChild(this.bursts.container);
+      this.projectileLayer.addChild(s);
     }
     for (let i = 0; i < this.projectilePool.length; i++) {
       const s = this.projectilePool[i];
@@ -176,10 +201,9 @@ export class Renderer {
   }
 }
 
-/** Map a continuous rotation (0 = up, clockwise positive) to one of the 40
- *  ship frames. Frame 0 points up; frames advance clockwise. */
-function directionFrame(rotation: number): number {
-  const n = SHIP.directions;
+/** Map a continuous rotation (0 = up, clockwise positive) to one of the ship's
+ *  `n` frames. Frame 0 points up; frames advance clockwise. */
+function directionFrame(rotation: number, n: number): number {
   const twoPi = Math.PI * 2;
   let r = rotation % twoPi;
   if (r < 0) r += twoPi;
