@@ -98,11 +98,18 @@ export interface StatusEffects {
 }
 
 /** Combat-runtime counters: scoring, the respawn timer, and the per-weapon
- *  cooldown timers. (Damage/death/respawn logic itself arrives in M1.) */
+ *  cooldown timers. */
 export interface Combat {
   bounty: number;
+  score: number; // accumulated kill points (victim bounty + base)
+  kills: number;
   deaths: number;
-  respawnAt: number; // tick to respawn at; 0 = alive
+  /** Tick at which a killed player respawns; 0 means alive. While > 0 the
+   *  player is dead: movement/firing skip it and it can't be hit again. */
+  respawnAt: number;
+  /** Who last damaged this player — the kill is credited to them. Cleared on
+   *  spawn. null = no recent attacker (e.g. died to a wall, later milestones). */
+  lastHitBy: PlayerId | null;
   flagsHeld: number;
   carryingBall: boolean;
   bulletCooldown: number; // ticks until the gun may fire again
@@ -145,6 +152,14 @@ export interface Projectile {
   prevY: number;
 }
 
+/** A projectile↔ship overlap found by the collision system (step 6) and consumed
+ *  by the damage system (step 7). Transient and sim-internal — it lives on the
+ *  world for one tick and is never serialized into a snapshot. */
+export interface Contact {
+  projectile: Projectile;
+  target: Player;
+}
+
 // --- Events (Layer C) --------------------------------------------------------
 
 /**
@@ -160,4 +175,40 @@ export interface BombExplodedEvent {
   y: number;
 }
 
-export type GameEvent = BombExplodedEvent;
+/** A ship took damage. Carries enough for a hit flash / sound and a damage
+ *  number; `fatal` lets a consumer distinguish the killing blow. */
+export interface ShipHitEvent {
+  type: "shipHit";
+  target: PlayerId;
+  by: PlayerId;
+  damage: number;
+  x: number;
+  y: number;
+  fatal: boolean;
+}
+
+/** A ship died. Drives the death explosion, the kill feed, and (later) audio.
+ *  `killer` is null for a non-credited death (e.g. wall/own bomb). */
+export interface ShipDiedEvent {
+  type: "shipDied";
+  victim: PlayerId;
+  killer: PlayerId | null;
+  bounty: number; // the victim's bounty at death (the points it was worth)
+  x: number;
+  y: number;
+}
+
+/** A ship (re)spawned into the world — the renderer uses it for a warp-in and
+ *  to avoid interpolating across the map from the death site. */
+export interface PlayerSpawnedEvent {
+  type: "playerSpawned";
+  player: PlayerId;
+  x: number;
+  y: number;
+}
+
+export type GameEvent =
+  | BombExplodedEvent
+  | ShipHitEvent
+  | ShipDiedEvent
+  | PlayerSpawnedEvent;

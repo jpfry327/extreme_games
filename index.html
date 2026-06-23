@@ -34,11 +34,23 @@
         font: 12px/1.4 monospace;
         pointer-events: none;
       }
+      #killfeed {
+        position: fixed;
+        left: 20%;   /* text left edge ~20% across */
+        bottom: 40%; /* ~40% up from the bottom */
+        text-align: left;
+        color: #fd6;
+        font: 13px/1.5 monospace;
+        white-space: pre;
+        pointer-events: none;
+        text-shadow: 0 0 3px #000;
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <div id="hud"></div>
+    <div id="killfeed"></div>
     <div id="help">arrows: rotate / thrust &nbsp;•&nbsp; Z (or ctrl): fire &nbsp;•&nbsp; Tab: bomb &nbsp;•&nbsp; shift: afterburner &nbsp;•&nbsp; F: fullscreen</div>
     <script type="module" src="/src/main.ts"></script>
   </body>

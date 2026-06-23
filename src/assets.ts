@@ -29,6 +29,14 @@ export const ASSETS = {
   // played when a bomb detonates.
   empburst: { url: "/shared/graphics/empburst.png", cols: 5, rows: 2, frames: 10 },
 
+  // Bullet-hit spark: a 10x1 strip of 32x32 frames, played where a bullet
+  // strikes a ship.
+  damage: { url: "/shared/graphics/damage.png", cols: 10, rows: 1, frames: 10 },
+
+  // Ship explosion: a 6x6 grid of 48x48 frames (36-frame animation), played
+  // when a ship is destroyed.
+  explode1: { url: "/shared/graphics/explode1.png", cols: 6, rows: 6, frames: 36 },
+
   // Tileset: 19x10 grid of 16x16 tiles. Converted from tileset.bmp -> .png.
   tileset: { url: "/arenas/svs/tileset.png", cols: 19, rows: 10 },
 

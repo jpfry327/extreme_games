@@ -142,3 +142,25 @@ export function shipConfig(type: ShipType): ShipConfig {
   if (!cfg) throw new Error(`No ShipConfig authored for ship type ${type}`);
   return cfg;
 }
+
+// --- Combat & scoring (M1) ---------------------------------------------------
+// Arena-wide combat rules, ported from the EG `.ini`. Unlike ship stats these
+// aren't per-ship — they're properties of the game mode. (Per-weapon damage
+// already lives on each ship's `bullet`/`bomb` WeaponConfig above.)
+export const COMBAT = {
+  /** [Bomb] BombExplodePixels — radius of a bomb's blast. A bomb deals its full
+   *  damage at the center and falls off linearly to 0 at this distance. */
+  bombExplodePixels: 18,
+
+  /** [Kill] EnterDelay — ticks a killed player waits before respawning. 200
+   *  ticks @100Hz = 2s, the EG lobby value. */
+  enterDelayTicks: 200,
+
+  /** [Kill] BountyIncreaseForKill — flat bounty the killer gains per kill. The
+   *  victim's own bounty is also rolled into the killer's *score* (below). */
+  bountyIncreaseForKill: 10,
+
+  /** [Kill] RewardBase — flat points per kill, on top of the victim's bounty.
+   *  EG runs this at 0 (score is purely the victim's bounty). */
+  killPointsBase: 0,
+} as const;

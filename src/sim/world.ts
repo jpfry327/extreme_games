@@ -1,14 +1,27 @@
-import { TILE_SIZE, WARBIRD } from "../config";
+import { WARBIRD, type ShipType } from "../config";
 import { GameMap } from "./gamemap";
 import { createPlayer } from "./player";
 import { SeededRng } from "./rng";
+import { findSpawn } from "./spawn";
+import { collisionSystem } from "./systems/collision";
+import { damageSystem } from "./systems/damage";
+import { deathSystem } from "./systems/death";
 import { firingSystem } from "./systems/firing";
 import { movementSystem } from "./systems/movement";
 import { projectileSystem } from "./systems/projectiles";
-import type { Player, PlayerId, Projectile, GameEvent, StepContext } from "./types";
+import { respawnSystem } from "./systems/respawn";
+import type {
+  Contact,
+  GameEvent,
+  Player,
+  PlayerId,
+  Projectile,
+  StepContext,
+  TeamId,
+} from "./types";
 
 /** The single local player's id. With no network yet, there's exactly one
- *  player and the client owns it. (Networking assigns real ids in M2.) */
+ *  human player and the client owns it. (Networking assigns real ids in M2.) */
 export const LOCAL_PLAYER_ID: PlayerId = "local";
 
 /**
@@ -24,11 +37,16 @@ export class World {
   players = new Map<PlayerId, Player>();
   projectiles: Projectile[] = [];
 
+  /** Projectile↔ship overlaps found by the collision system (step 6) and
+   *  consumed by the damage system (step 7). Transient, sim-internal, rebuilt
+   *  every tick — never part of a snapshot. */
+  contacts: Contact[] = [];
+
   /** Deterministic RNG — the sim never calls Math.random() (architecture §5.2). */
   rng: SeededRng;
 
-  /** Events produced this tick (Layer C). Appended to during step(); the
-   *  renderer drains this once per drawn frame. */
+  /** Events produced this tick (Layer C). Appended to during step(); the client
+   *  drains and clears this once per drawn frame (see main.ts). */
   events: GameEvent[] = [];
 
   /** Which player this client controls / the camera follows. Server-side this
@@ -40,9 +58,7 @@ export class World {
     seed = 1,
   ) {
     this.rng = new SeededRng(seed);
-    const spawn = findSpawn(map);
-    const player = createPlayer(LOCAL_PLAYER_ID, "Player", 0, WARBIRD, spawn.x, spawn.y);
-    this.players.set(player.id, player);
+    this.addPlayer(LOCAL_PLAYER_ID, "Player", 0, WARBIRD);
   }
 
   /** Convenience accessor for the client's own player. */
@@ -50,20 +66,31 @@ export class World {
     return this.players.get(this.localPlayerId)!;
   }
 
+  /** Add a player at a fresh spawn point and return it. This is the one path
+   *  for everyone who enters the world — the local player, the M1 bot, and the
+   *  networked players of M2. */
+  addPlayer(id: PlayerId, name: string, team: TeamId, shipType: ShipType): Player {
+    const spawn = findSpawn(this.map, this.rng);
+    const player = createPlayer(id, name, team, shipType, spawn.x, spawn.y);
+    this.players.set(player.id, player);
+    return player;
+  }
+
   /**
-   * Advance the simulation one fixed tick by running each system in order.
-   * The order is itself a design decision (architecture §3): a system reads the
+   * Advance the simulation one fixed tick by running each system in order. The
+   * order is itself a design decision (architecture §3): a system reads the
    * world as left by the systems before it. Steps not yet built are listed so
-   * the intended shape is visible — they're filled in over M1–M5.
+   * the intended shape stays visible — they're filled in over M4–M5.
    *
    *   1. intent       — (folded into movement/firing for now)
    *   2. movement     — rotate, thrust, drag, wall-bounce        ✅
    *   3. firing       — spawn projectiles; debit energy/cooldown ✅
    *   4. items        — repel/burst/decoy/…                       (M5)
-   *   5. projectiles  — move, bounce, lifetime, detonation       ✅
-   *   6. collision    — projectile↔ship, ship↔ship                (M1)
-   *   7. damage       — apply hits → energy; queue deaths         (M1)
-   *   8. death/respawn— kill credit, bounty, respawn timers       (M1)
+   *   5. projectiles  — move, bounce, lifetime                    ✅
+   *   6. collision    — projectile↔ship                          ✅ (M1)
+   *   7. damage       — apply hits → energy; emit shipHit         ✅ (M1)
+   *   8a. death       — kill credit, bounty, respawn timer        ✅ (M1)
+   *   8b. respawn     — EnterDelay countdown, re-spawn            ✅ (M1)
    *   9. status       — toggle energy drain; expire timed effects (M5)
    *  10. resources    — energy recharge (in movement for now)     (M1+)
    *  11. prizes / 12. objectives / 13. regions                    (later)
@@ -73,28 +100,9 @@ export class World {
     movementSystem(this, ctx);
     firingSystem(this, ctx);
     projectileSystem(this);
+    collisionSystem(this);
+    damageSystem(this);
+    deathSystem(this);
+    respawnSystem(this);
   }
-}
-
-/** Find an open spawn point: start at map center, spiral out to the nearest
- *  empty tile so we never spawn embedded in a wall. */
-function findSpawn(map: GameMap): { x: number; y: number } {
-  const cx = Math.floor(map.width / 2);
-  const cy = Math.floor(map.height / 2);
-  const toPixel = (tx: number, ty: number) => ({
-    x: tx * TILE_SIZE + TILE_SIZE / 2,
-    y: ty * TILE_SIZE + TILE_SIZE / 2,
-  });
-
-  if (!map.isSolidTile(cx, cy)) return toPixel(cx, cy);
-
-  for (let radius = 1; radius < map.width; radius++) {
-    for (let dy = -radius; dy <= radius; dy++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue; // ring only
-        if (!map.isSolidTile(cx + dx, cy + dy)) return toPixel(cx + dx, cy + dy);
-      }
-    }
-  }
-  return toPixel(cx, cy); // give up; shouldn't happen
 }

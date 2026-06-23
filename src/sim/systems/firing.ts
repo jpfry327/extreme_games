@@ -1,5 +1,5 @@
 import { shipConfig, type WeaponConfig } from "../../config";
-import { snapDirection } from "../player";
+import { isAlive, snapDirection } from "../player";
 import type { Player, Projectile, ProjectileKind, StepContext } from "../types";
 import type { World } from "../world";
 
@@ -10,6 +10,7 @@ import type { World } from "../world";
  */
 export function firingSystem(world: World, ctx: StepContext): void {
   for (const player of world.players.values()) {
+    if (!isAlive(player)) continue; // dead ships can't fire
     const input = ctx.inputs.get(player.id);
     if (!input) continue;
 

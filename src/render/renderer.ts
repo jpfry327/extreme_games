@@ -2,9 +2,11 @@ import { Application, Container, Sprite, Texture } from "pixi.js";
 import { ASSETS } from "../assets";
 import { shipConfig } from "../config";
 import type { GameMap } from "../sim/gamemap";
+import { isAlive } from "../sim/player";
 import type { Player, Projectile } from "../sim/types";
 import type { World } from "../sim/world";
 import { EffectsLayer } from "./effects";
+import { NametagLayer } from "./nametags";
 import { loadSheet } from "./textures";
 import { TileLayer } from "./tiles";
 
@@ -22,7 +24,9 @@ const BLUE_TRAIL_FRAME = 2 * ASSETS.trail.cols; // row 2, col 0 = 20
 // Bomb-trail tuning (real-time milliseconds, not sim ticks — these are visuals).
 const TRAIL_FRAME_MS = 28; // per puff frame -> ~280ms puff lifetime
 const TRAIL_EMIT_MS = 16; // spacing between puffs along the bomb's path
-const BURST_FRAME_MS = 35; // per explosion frame -> ~350ms detonation
+const BURST_FRAME_MS = 35; // per empburst frame -> ~350ms bomb detonation
+const EXPLODE_FRAME_MS = 20; // per explode1 frame -> ~720ms ship explosion (36 frames)
+const HIT_FRAME_MS = 22; // per damage frame -> ~220ms bullet-hit spark (10 frames)
 
 export class Renderer {
   readonly app = new Application();
@@ -40,9 +44,13 @@ export class Renderer {
   // Cosmetic effects, split into two layers so trails sit behind the bomb and
   // explosions burst on top.
   private trailFrames!: Texture[];
-  private burstFrames!: Texture[];
+  private burstFrames!: Texture[]; // empburst — bomb detonations
+  private explodeFrames!: Texture[]; // explode1 — ship deaths
+  private hitFrames!: Texture[]; // damage — bullet-hit sparks
   private trails!: EffectsLayer;
   private bursts!: EffectsLayer;
+  // Player nametags (name + bounty), drawn above the ships.
+  private nametags!: NametagLayer;
   // When each live bomb last dropped a trail puff (real-time clock, ms).
   private lastTrailEmit = new WeakMap<Projectile, number>();
   private clockMs = 0;
@@ -64,6 +72,8 @@ export class Renderer {
     // We only ever draw the blue puff row, so keep just those frames.
     this.trailFrames = trailSheet.slice(BLUE_TRAIL_FRAME, BLUE_TRAIL_FRAME + ASSETS.trail.cols);
     this.burstFrames = await loadSheet(ASSETS.empburst.url, ASSETS.empburst.cols, ASSETS.empburst.rows, ASSETS.empburst.frames);
+    this.explodeFrames = await loadSheet(ASSETS.explode1.url, ASSETS.explode1.cols, ASSETS.explode1.rows, ASSETS.explode1.frames);
+    this.hitFrames = await loadSheet(ASSETS.damage.url, ASSETS.damage.cols, ASSETS.damage.rows, ASSETS.damage.frames);
     const tilesetFrames = await loadSheet(ASSETS.tileset.url, ASSETS.tileset.cols, ASSETS.tileset.rows);
 
     this.world = new Container();
@@ -86,6 +96,10 @@ export class Renderer {
     // Explosions render on top of everything.
     this.bursts = new EffectsLayer();
     this.world.addChild(this.bursts.container);
+
+    // Nametags sit above the world art but follow the ships in world space.
+    this.nametags = new NametagLayer();
+    this.world.addChild(this.nametags.container);
 
     const onResize = () => this.tiles.resize(this.app.screen.width, this.app.screen.height);
     window.addEventListener("resize", onResize);
@@ -113,6 +127,7 @@ export class Renderer {
     this.drawPlayers(world, alpha);
     this.drawProjectiles(world, alpha);
     this.drawEffects(world, alpha, dtSeconds * 1000);
+    this.nametags.update(world, alpha);
   }
 
   /** Draw every player's ship, growing the sprite pool to fit. Each sprite is
@@ -128,7 +143,8 @@ export class Renderer {
     for (let i = 0; i < this.shipPool.length; i++) {
       const s = this.shipPool[i];
       const p = players[i];
-      if (!p) {
+      if (!p || !isAlive(p)) {
+        // No player for this slot, or the ship is dead and waiting to respawn.
         s.visible = false;
         continue;
       }
@@ -141,17 +157,23 @@ export class Renderer {
     }
   }
 
-  /** Turn sim bomb-detonation events into explosions, drop trail puffs behind
-   *  flying bombs, and advance both effect layers. */
+  /** Turn sim detonation / death events into explosions, drop trail puffs behind
+   *  flying bombs, and advance both effect layers.
+   *
+   *  NOTE: we read `world.events` but do NOT clear it — main.ts owns draining so
+   *  other consumers (the kill feed, later audio) see the same events first. */
   private drawEffects(world: World, alpha: number, dtMs: number): void {
-    // Detonations the sim reported this frame -> spawn an EMP burst at each.
-    if (world.events.length) {
-      for (const e of world.events) {
-        if (e.type === "bombExploded") {
-          this.bursts.spawn(this.burstFrames, e.x, e.y, BURST_FRAME_MS);
-        }
+    for (const e of world.events) {
+      if (e.type === "bombExploded") {
+        this.bursts.spawn(this.burstFrames, e.x, e.y, BURST_FRAME_MS);
+      } else if (e.type === "shipDied") {
+        // Ship explosion — the dedicated explode1 animation at the wreck.
+        this.bursts.spawn(this.explodeFrames, e.x, e.y, EXPLODE_FRAME_MS);
+      } else if (e.type === "shipHit" && !e.fatal) {
+        // Bullet/bomb hit spark on the struck ship (skip if it was the killing
+        // blow — the explosion covers it).
+        this.bursts.spawn(this.hitFrames, e.x, e.y, HIT_FRAME_MS);
       }
-      world.events.length = 0; // consumed
     }
 
     // Emit trail puffs behind each live bomb, spaced out in real time so the

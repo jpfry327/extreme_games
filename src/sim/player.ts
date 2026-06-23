@@ -65,14 +65,24 @@ export function createPlayer(
     },
     combat: {
       bounty: 0,
+      score: 0,
+      kills: 0,
       deaths: 0,
       respawnAt: 0,
+      lastHitBy: null,
       flagsHeld: 0,
       carryingBall: false,
       bulletCooldown: 0,
       bombCooldown: 0,
     },
   };
+}
+
+/** A player is alive (steppable, hittable, drawable) unless it's waiting out a
+ *  respawn timer. `respawnAt === 0` is the canonical "alive" marker — set when
+ *  a ship spawns and restored by the respawn system (architecture §3 step 8). */
+export function isAlive(player: Player): boolean {
+  return player.combat.respawnAt === 0;
 }
 
 /**

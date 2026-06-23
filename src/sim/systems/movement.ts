@@ -1,7 +1,7 @@
 import { shipConfig } from "../../config";
 import { moveAndCollide } from "../collision";
 import type { GameMap } from "../gamemap";
-import { snapDirection, tierFor } from "../player";
+import { isAlive, snapDirection, tierFor } from "../player";
 import type { InputCommand, Player, StepContext } from "../types";
 import type { World } from "../world";
 
@@ -29,6 +29,7 @@ const IDLE: InputCommand = {
  */
 export function movementSystem(world: World, ctx: StepContext): void {
   for (const player of world.players.values()) {
+    if (!isAlive(player)) continue; // dead ships don't move or recharge
     stepPlayer(player, ctx.inputs.get(player.id) ?? IDLE, world.map);
   }
 }

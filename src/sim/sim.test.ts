@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { shipConfig, WARBIRD } from "../config";
+import { COMBAT, shipConfig, WARBIRD } from "../config";
 import { GameMap } from "./gamemap";
+import { isAlive } from "./player";
 import { SeededRng } from "./rng";
-import type { InputCommand, StepContext } from "./types";
+import type { InputCommand, Player, Projectile, StepContext } from "./types";
 import { World } from "./world";
 
 // --- Test fixtures -----------------------------------------------------------
@@ -126,6 +127,147 @@ describe("projectileSystem", () => {
     }
     expect(world.events.some((e) => e.type === "bombExploded")).toBe(true);
     expect(world.projectiles).toHaveLength(0); // dead projectile compacted out
+  });
+});
+
+// --- Combat: collision -> damage -> death -> respawn (M1) --------------------
+
+/** Idle context — every player coasts. Systems read inputs per id; an empty
+ *  map means nobody is pressing anything. */
+const IDLE_CTX: StepContext = { inputs: new Map() };
+
+/** Add a second player (the bot's role) and place it at an exact spot, so a
+ *  hand-placed projectile can be aimed deterministically. */
+function placeEnemy(world: World, id: string, x: number, y: number): Player {
+  const p = world.addPlayer(id, id, 1, WARBIRD);
+  p.kinematics.x = p.kinematics.prevX = x;
+  p.kinematics.y = p.kinematics.prevY = y;
+  return p;
+}
+
+/** A stationary projectile sitting on (x, y), owned by `owner`. Dropping one of
+ *  these into world.projectiles lets a test trigger a hit without flying a real
+ *  shot into the target. */
+function projectileAt(
+  kind: Projectile["kind"],
+  owner: string,
+  x: number,
+  y: number,
+): Projectile {
+  const w = kind === "bullet" ? shipConfig(WARBIRD).bullet : shipConfig(WARBIRD).bomb;
+  return {
+    kind,
+    owner,
+    x,
+    y,
+    vx: 0,
+    vy: 0,
+    life: w.lifetimeTicks,
+    bounces: w.bounces,
+    radius: w.radius,
+    alive: true,
+    prevX: x,
+    prevY: y,
+  };
+}
+
+describe("collision + damage", () => {
+  it("a bullet hits an enemy, debits its energy, and emits shipHit", () => {
+    const world = new World(openMap());
+    const me = world.localPlayer;
+    const enemy = placeEnemy(world, "enemy", me.kinematics.x + 100, me.kinematics.y);
+    const before = enemy.resources.energy;
+
+    world.projectiles.push(projectileAt("bullet", me.id, enemy.kinematics.x, enemy.kinematics.y));
+    world.step(IDLE_CTX);
+
+    expect(enemy.resources.energy).toBe(before - shipConfig(WARBIRD).bullet.damage);
+    expect(enemy.combat.lastHitBy).toBe(me.id);
+    expect(world.events.some((e) => e.type === "shipHit" && e.target === "enemy")).toBe(true);
+    expect(world.projectiles).toHaveLength(0); // bullet spent
+  });
+
+  it("never hits the player who fired it (owner immunity)", () => {
+    const world = new World(openMap());
+    const me = world.localPlayer;
+    const before = me.resources.energy;
+
+    world.projectiles.push(projectileAt("bullet", me.id, me.kinematics.x, me.kinematics.y));
+    world.step(IDLE_CTX);
+
+    expect(me.resources.energy).toBe(before); // unharmed by its own shot
+    expect(world.projectiles).toHaveLength(1); // and the shot flies on
+  });
+
+  it("a bomb deals area damage where it detonates", () => {
+    const world = new World(openMap());
+    const me = world.localPlayer;
+    const enemy = placeEnemy(world, "enemy", me.kinematics.x + 200, me.kinematics.y);
+    const before = enemy.resources.energy;
+
+    world.projectiles.push(projectileAt("bomb", me.id, enemy.kinematics.x, enemy.kinematics.y));
+    world.step(IDLE_CTX);
+
+    expect(enemy.resources.energy).toBeLessThan(before);
+    expect(world.events.some((e) => e.type === "bombExploded")).toBe(true);
+  });
+});
+
+describe("death + respawn", () => {
+  it("a fatal hit kills the target and credits the killer", () => {
+    const world = new World(openMap());
+    const me = world.localPlayer;
+    const enemy = placeEnemy(world, "enemy", me.kinematics.x + 100, me.kinematics.y);
+    enemy.resources.energy = 50; // one bullet (210) is lethal
+
+    world.projectiles.push(projectileAt("bullet", me.id, enemy.kinematics.x, enemy.kinematics.y));
+    world.step(IDLE_CTX);
+
+    expect(isAlive(enemy)).toBe(false);
+    expect(enemy.combat.deaths).toBe(1);
+    expect(enemy.combat.respawnAt).toBe(world.tick + COMBAT.enterDelayTicks);
+    expect(me.combat.kills).toBe(1);
+    expect(me.combat.bounty).toBe(COMBAT.bountyIncreaseForKill);
+    expect(world.events.some((e) => e.type === "shipDied" && e.killer === me.id)).toBe(true);
+  });
+
+  it("respawns at full energy after EnterDelay, clearing the dead flag", () => {
+    const world = new World(openMap());
+    const me = world.localPlayer;
+    const enemy = placeEnemy(world, "enemy", me.kinematics.x + 100, me.kinematics.y);
+    enemy.resources.energy = 50;
+    enemy.combat.bounty = 7; // earned bounty is wiped on respawn
+
+    world.projectiles.push(projectileAt("bullet", me.id, enemy.kinematics.x, enemy.kinematics.y));
+    world.step(IDLE_CTX);
+    expect(isAlive(enemy)).toBe(false);
+
+    // Run out the respawn timer.
+    while (!isAlive(enemy)) world.step(IDLE_CTX);
+
+    expect(enemy.resources.energy).toBe(shipConfig(WARBIRD).initial.maxEnergy);
+    expect(enemy.combat.respawnAt).toBe(0);
+    expect(enemy.combat.bounty).toBe(0);
+    expect(enemy.combat.lastHitBy).toBeNull();
+    expect(world.events.some((e) => e.type === "playerSpawned" && e.player === "enemy")).toBe(true);
+  });
+
+  it("a dead ship can't fire or be hit again", () => {
+    const world = new World(openMap());
+    const me = world.localPlayer;
+    const enemy = placeEnemy(world, "enemy", me.kinematics.x + 100, me.kinematics.y);
+    enemy.resources.energy = 50;
+
+    world.projectiles.push(projectileAt("bullet", me.id, enemy.kinematics.x, enemy.kinematics.y));
+    world.step(IDLE_CTX);
+    expect(isAlive(enemy)).toBe(false);
+    const deathsAfterFirst = enemy.combat.deaths;
+
+    // A second shot onto the corpse passes straight through (no extra death).
+    world.projectiles.push(projectileAt("bullet", me.id, enemy.kinematics.x, enemy.kinematics.y));
+    world.step(IDLE_CTX);
+    expect(enemy.combat.deaths).toBe(deathsAfterFirst);
+    expect(world.projectiles).toHaveLength(1); // the shot ignored the ghost
   });
 });
 
