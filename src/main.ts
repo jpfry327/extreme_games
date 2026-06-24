@@ -1,4 +1,4 @@
-import { TICK_HZ } from "./config";
+import { NET, TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
@@ -6,7 +6,7 @@ import { isAlive } from "./sim/player";
 import { World } from "./sim/world";
 import { Renderer } from "./render/renderer";
 import { WebSocketTransport } from "./net/WebSocketTransport";
-import { applySnapshot } from "./net/snapshot";
+import { SnapshotInterpolator } from "./net/interpolation";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
 // above for these three and uncomment the loopback block below:
@@ -22,8 +22,11 @@ async function main() {
   // 1. Load the map.
   const map = await loadMap();
 
-  // 2. Create the client world — snapshot-driven, never stepped by the client.
-  const clientWorld = new World(map, 1, false);
+  // 2. Create the view world — never stepped. The interpolator rebuilds it each
+  //    frame from buffered snapshots, rendering remote entities ~interpDelay in
+  //    the past so they glide instead of snapping at the 20Hz broadcast rate.
+  const view = new World(map, 1, false);
+  const interp = new SnapshotInterpolator();
 
   // 3. Input + renderer — initialize NOW so the canvas is on screen while we
   //    connect. The game loop starts immediately in "connecting…" mode.
@@ -60,13 +63,15 @@ async function main() {
   // const transport = new LoopbackTransport(server, server.localPlayerId);
   // ------------------------------------------------
 
-  transport.setSnapshotHandler((snap) => applySnapshot(clientWorld, snap));
+  // Buffer each snapshot with its arrival time; the interpolator consumes the
+  // buffer at render time. (M2.0 applied snapshots directly — that snapped.)
+  transport.setSnapshotHandler((snap) => interp.push(snap, performance.now()));
 
   // `connected` flips true once the server sends `welcome` and we know our
   // PlayerId. The render loop runs in "connecting…" mode until then.
   let connected = false;
   transport.onConnected = (playerId) => {
-    clientWorld.localPlayerId = playerId;
+    view.localPlayerId = playerId;
     connected = true;
     console.info(`[client] connected as ${playerId}`);
   };
@@ -93,20 +98,22 @@ async function main() {
 
     // --- loopback only: advance the in-process server + feed the bot ---
     // const alpha = server.advance(dt);
-    // transport.sendInputAs(BOT_PLAYER_ID, computeBotInput(clientWorld, BOT_PLAYER_ID));
+    // transport.sendInputAs(BOT_PLAYER_ID, computeBotInput(view, BOT_PLAYER_ID));
     // --------------------------------------------------------------------
 
-    // Draw from the client world. Every pixel has passed through the
-    // serialize → deserialize round-trip (snapshot from the server).
-    // Own ship visibly lags RTT in M2.1; M2.4 adds prediction to fix that.
-    renderer.draw(clientWorld, 1, dt);
+    // Rebuild the view world from buffered snapshots: remote ships/bullets are
+    // interpolated ~interpDelay in the past (smooth); the local ship is pinned
+    // to the latest snapshot (still laggy — M2.4 adds prediction). The pose is
+    // baked in with prev*===current, so alpha is a no-op here.
+    interp.buildView(view, now, NET.interpDelayMs, view.localPlayerId);
+    renderer.draw(view, 1, dt);
 
-    // Drain events piggybacked on the snapshot.
-    for (const e of clientWorld.events) {
+    // Drain events the interpolator released (in interpolated time) this frame.
+    for (const e of view.events) {
       if (e.type === "shipDied")
-        feed.add(killLine(clientWorld, e.killer, e.victim), now);
+        feed.add(killLine(view, e.killer, e.victim), now);
     }
-    clientWorld.events.length = 0;
+    view.events.length = 0;
     feed.render(now);
 
     // HUD.
@@ -117,13 +124,13 @@ async function main() {
       fpsAccum = 0;
       fpsFrames = 0;
     }
-    const me = clientWorld.localPlayer;
+    const me = view.players.get(view.localPlayerId);
     if (me) {
       const k = me.kinematics;
       const speed = Math.hypot(k.vx, k.vy);
       const status = isAlive(me)
         ? `energy ${me.resources.energy.toFixed(0)}`
-        : `RESPAWNING in ${((me.combat.respawnAt - clientWorld.tick) / TICK_HZ).toFixed(1)}s`;
+        : `RESPAWNING in ${((me.combat.respawnAt - view.tick) / TICK_HZ).toFixed(1)}s`;
       hud.textContent =
         `fps ${fps}  (sim ${TICK_HZ}Hz)\n` +
         `pos ${k.x.toFixed(0)}, ${k.y.toFixed(0)}\n` +
@@ -131,7 +138,7 @@ async function main() {
         `${status}\n` +
         `bounty ${me.combat.bounty}  score ${me.combat.score}  ` +
         `${me.combat.kills}-${me.combat.deaths} (K-D)\n` +
-        `projectiles ${clientWorld.projectiles.length}`;
+        `projectiles ${view.projectiles.length}`;
     }
 
     requestAnimationFrame(frame);
