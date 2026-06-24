@@ -50,8 +50,9 @@ export class World {
   events: GameEvent[] = [];
 
   /** Which player this client controls / the camera follows. Server-side this
-   *  has no meaning; it's a client convenience that rides along on the world. */
-  readonly localPlayerId: PlayerId = LOCAL_PLAYER_ID;
+   *  has no meaning; it's a client convenience that rides along on the world.
+   *  Set by main.ts after the server sends `welcome` (M2.1+). */
+  localPlayerId: PlayerId = LOCAL_PLAYER_ID;
 
   /** Monotonically increasing counter for stable projectile ids. Incremented by
    *  the firing system each time a projectile is spawned, so snapshots can track

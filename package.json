@@ -5,15 +5,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "tsx --watch server/index.ts",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "pixi.js": "^8.6.6"
+    "pixi.js": "^8.6.6",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.22.4",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
     "vitest": "^3.0.0"

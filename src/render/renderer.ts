@@ -110,9 +110,10 @@ export class Renderer {
   /** Draw one frame, blending between the last two sim ticks by `alpha`.
    *  `dtSeconds` is the real frame time, used to drive the cosmetic effects. */
   draw(world: World, alpha: number, dtSeconds: number): void {
+    const local = world.players.get(world.localPlayerId)?.kinematics;
+    if (!local) return; // snapshot hasn't arrived yet; nothing to render
     const sw = this.app.screen.width;
     const sh = this.app.screen.height;
-    const local = world.localPlayer.kinematics;
     this.clockMs += dtSeconds * 1000;
 
     // Interpolated camera target = where the local player visually is this frame.
