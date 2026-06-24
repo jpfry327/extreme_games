@@ -112,27 +112,301 @@ respawn; bounty and points tick; a kill line appears.
 
 ## M2 — Multiplayer transport
 
-**Goal:** the authoritative server runs the sim headless; two browsers connect
-and fight on it. This is the architecture's payoff and the project's biggest bet.
+**Goal:** the authoritative server runs the sim headless; browsers connect and
+fight on it with prediction-smooth movement and instant-feeling weapons. This is
+the architecture's payoff and the project's biggest bet.
 
-**Unlocks:** real multiplayer; replaces the bot with real players (bot stays as
-AI filler). Proves the snapshot + prediction model against real gameplay.
+**Unlocks:** real multiplayer; replaces the bot with real players (the bot stays
+as AI filler, now server-side). Proves the snapshot + prediction model against
+real gameplay.
+
+### Why M2 is split into M2.0–M2.7
+
+A naive single-pass M2 produced **laggy weapons** (every shot waited a server
+round-trip) and **jittery ships** (the client snapped to each snapshot instead of
+deterministically replaying). Both regressions come from collapsing four
+*independent* concerns — **transport**, **interpolation**, **prediction**, and
+**reconciliation** — into one step, and from sharing a single `World` between the
+sim and the renderer. So we build them as separate, individually playable slices.
+
+The ordering rule: **get an honest, ugly, laggy build working first**
+(M2.0–M2.2), *then* make it feel good one mechanism at a time (M2.3–M2.6). Never
+add prediction before the authoritative path is provably correct — that's exactly
+the mistake that caused the snapping last time.
+
+**The mental model we're implementing** (architecture §5.2):
+
+- The **server** is the single source of truth; it runs the existing
+  `World.step()` at 100Hz, unchanged.
+- The **client holds two worlds**: a *received* world (the last authoritative
+  snapshot, used to interpolate everyone else) and a *predicted* world (the local
+  player simulated ahead of the server).
+- The **local player** is **predicted** (instant) then **reconciled** (rewind to
+  the last ack, replay un-acked inputs). **Remote players** are **interpolated**
+  (rendered slightly in the past). **Local projectiles** are **predicted** then
+  reconciled to their server-spawned twin.
+
+Each sub-step below ends in a build you can run and feel, and names exactly what
+should *still* look wrong so the next step's improvement is visible.
+
+**Refs (whole milestone):** catalog §10; architecture §5, §5.1, §5.2.
+
+---
+
+### M2.0 — Split the world across a loopback seam (no network yet)
+
+**Goal:** introduce the client↔server boundary *in-process*, before any socket
+exists, so we debug the snapshot model without network noise. **This is the
+keystone of M2** — the naive attempt failed in large part because the sim and the
+renderer shared one `World`.
 
 **Scope:**
-- [ ] `net/`: a server process running `sim/` at 100Hz, headless.
-- [ ] WebSocket transport: client → `InputCommand`; server → `Snapshot` + `events`.
-- [ ] `serializeSnapshotFor(world, playerId)` — start global, but build the
-      **per-client seam** now (filtering comes with stealth in M5).
-- [ ] Client-side **prediction + reconciliation** for the local player.
-- [ ] **Entity interpolation** for remote players (extend the existing tick-interp).
-- [ ] Join/leave, basic player identity (name), debug-quality nametags.
+- [ ] `net/transport.ts`: a `Transport` interface (`sendInput(cmd)`,
+      `onSnapshot(cb)`, lifecycle hooks) + a `LoopbackTransport` that passes calls
+      straight through with zero delay.
+- [ ] `net/server.ts` (in-process): a `GameServer` that owns the **authoritative**
+      `World` + `FixedLoop`, ingests `InputCommand`s, and steps at 100Hz.
+- [ ] `net/snapshot.ts`: `serializeSnapshotFor(world, playerId): Snapshot` and
+      `applySnapshot(world, snap)`. `Snapshot` is the Layer-A subset (players +
+      projectiles + `tick`). Build the **per-client signature now** even though it
+      returns everyone (the filtering seam for stealth/AOI lands in M5).
+- [ ] Stable entity ids: give `Projectile` a server-assigned `id` so snapshots can
+      be diffed and tracked across ticks (players already have `id`).
+- [ ] Client side: a separate **client `World`** that is *never stepped* — it is
+      overwritten by `applySnapshot`. The renderer reads this client world.
+- [ ] Rewire `main.ts`: keyboard → `transport.sendInput` → server; server snapshot
+      → `applySnapshot` → renderer. The local player is in the snapshot like
+      everyone else (no special-casing yet).
 
-**Out of scope:** polished UI, chat, ships beyond Warbird, items, accounts.
+**Out of scope:** sockets, a second process, prediction, interpolation (the
+snapshot is applied immediately, full-state, every tick), delta/AOI compression.
 
-**Playable end state:** open two tabs → both join a server → see and fight each
-other with prediction-smooth movement. The core bet is now de-risked.
+**Playable end state:** identical to M1 — you fight the bot — but every pixel on
+screen now comes from a `serialize → deserialize` round-trip through the loopback.
+It looks normal because loopback has zero latency. **If it plays exactly like M1,
+the seam is correct.**
 
-**Refs:** catalog §10; architecture §5.
+---
+
+### M2.1 — WebSocket transport & a headless server process
+
+**Goal:** replace the loopback with a real socket and a real second process. The
+server runs on Node, headless, with **no rendering imports** — the proof that
+`sim/` is pure.
+
+**Scope:**
+- [ ] `server/` entry: a Node process that constructs the sim `World` + `FixedLoop`
+      and steps at 100Hz on a precise timer, importing only `sim/` + `config`.
+- [ ] `WebSocketTransport` (client) implementing the same `Transport` interface as
+      the loopback — swapping it should be a one-line change in `main.ts`.
+- [ ] Wire protocol v0 in `net/protocol.ts`: `hello`/`welcome` handshake (server
+      assigns the real `PlayerId`), `input` (client→server), `snapshot`
+      (server→client). JSON to start; binary is a later optimization.
+- [ ] Snapshot **send rate decoupled from tick rate** (step at 100Hz, broadcast at
+      ~20–30Hz). The client still applies the latest snapshot directly — so the
+      **local ship visibly lags by RTT and snaps**. This is expected; the wire is
+      being honest.
+- [ ] Connection lifecycle: a join adds a player at a server spawn; a disconnect
+      removes them. Document the Vite dev-proxy / port wiring.
+
+**Out of scope:** prediction, interpolation, input acks, reconnection, auth,
+encryption (the VIE/Continuum protocol is explicitly out — see README/catalog
+§10), delta/AOI culling.
+
+**Playable end state:** open two browser tabs (or two machines) → both connect to
+the one server → each sees the other move. It's laggy and rubber-bandy for your
+*own* ship; that is correct for this step. The architecture's central claim — *the
+same `sim/` runs headless on a server* — is now proven true.
+
+---
+
+### M2.2 — Entity interpolation for remote players
+
+**Goal:** make *other* players smooth by rendering them ~100ms in the past,
+interpolating between two buffered snapshots. Generalizes the existing
+`prevX/prevY` tick-interp into snapshot-interp.
+
+**Scope:**
+- [ ] Client snapshot buffer: keep the last N snapshots with their server tick /
+      receive timestamp.
+- [ ] Render-time interpolation: for every **remote** entity, find the two
+      snapshots straddling `renderTime = now − interpDelay` and lerp pose between
+      them (reuse the renderer's blend, generalized to an arbitrary snapshot pair).
+- [ ] `interpDelay` constant in config (start ~100ms ≈ 2–3 snapshots); tune to the
+      snapshot rate.
+- [ ] Entity add/remove across snapshots: spawns and leaves don't pop or smear
+      (uses the stable ids from M2.0).
+- [ ] Buffer-starvation fallback: when no future snapshot exists (lag spike),
+      briefly hold/extrapolate instead of snapping.
+- [ ] The **local player is still rendered from the latest authoritative snapshot**
+      (still laggy) — we deliberately do *not* predict yet, to keep this step
+      isolated.
+
+**Out of scope:** local prediction, projectile prediction, server-side lag
+compensation / rewind.
+
+**Playable end state:** remote ships **glide smoothly** even at a low snapshot
+rate and moderate latency. Your own ship still rubber-bands — the next steps fix
+that, and the contrast makes the interpolation visibly working.
+
+---
+
+### M2.3 — Input sequencing, server buffering & acks
+
+**Goal:** build the protocol scaffolding that reconciliation needs, with **no
+behavioral change yet**. Deliberately a "plumbing only" step so the prediction
+step that follows is small and focused.
+
+**Scope:**
+- [ ] Client stamps each `InputCommand` with a monotonic `seq` and the client tick
+      it was sampled for; keeps a ring buffer of un-acked inputs.
+- [ ] Send *every* input (don't drop on coalesced render frames) so the server has
+      a continuous command stream; document the fixed-tick input model (one command
+      per sim tick).
+- [ ] Server per-player input buffer: apply the command whose `seq` matches the
+      tick being stepped; if it's missing, repeat the last command (flagged) rather
+      than idling.
+- [ ] Server stamps each snapshot with `lastProcessedInputSeq` for the recipient
+      (the **ack**).
+- [ ] **Netcode debug overlay**: RTT, last-acked seq, server-tick vs client-tick,
+      input-buffer depth. This HUD is the verification tool for M2.4–M2.6.
+
+**Out of scope:** actually *using* the acks to correct anything (that's M2.4),
+clock-sync sophistication, lag compensation.
+
+**Playable end state:** plays exactly like M2.2 (own ship still laggy), but the
+debug overlay now shows the server acking your inputs by sequence number. The data
+plane for prediction is in place and inspectable.
+
+---
+
+### M2.4 — Client-side prediction + reconciliation for the local ship
+
+**Goal:** make the local ship respond **instantly** and stop rubber-banding, via
+**rewind-and-replay**. This is the direct fix for the *"jittery ship movement —
+snapping instead of deterministic replaying"* regression.
+
+**Scope:**
+- [ ] A **predicted world** containing the local player, stepped locally every
+      render frame through the *exact same* `sim/systems` (determinism is what
+      makes this legal — architecture §5.2).
+- [ ] On each authoritative snapshot: **reset** the local player to the acked
+      server state, then **replay** every un-acked input (`seq >
+      lastProcessedInputSeq`) through `World.step()` to re-derive "now." Drop acked
+      inputs from the ring buffer.
+- [ ] Render the local ship from the **predicted** world; render everyone else from
+      the **interpolated received** world (M2.2). One renderer, two clearly
+      separated sources.
+- [ ] **Prediction-error metric** on the debug HUD: distance between predicted and
+      authoritative local pose after replay. In clean conditions it must be ≈0 —
+      this proves client/server determinism parity.
+- [ ] Correct, **hard** reconciliation first: a visible snap on mismatch is
+      acceptable *here*. Smoothing is the next step — we separate "the replay is
+      correct" from "the correction is pretty."
+
+**Out of scope:** correction smoothing, projectile prediction,
+network-condition simulation (next two steps), predicting remote players.
+
+**Playable end state:** your ship reacts the **instant** you press a key; under
+good conditions there is no rubber-band and the prediction-error meter sits at ~0.
+Any residual correction may still snap — fixed in M2.5.
+
+---
+
+### M2.5 — Correction smoothing & network-condition hardening
+
+**Goal:** remove the last visible snap and prove the model holds under real-world
+latency, jitter, and loss. Turns "works on localhost" into "works on the
+internet."
+
+**Scope:**
+- [ ] In-transport **network simulator** (toggleable): added latency, jitter, and
+      packet loss in both directions, controllable from the debug HUD — so bad
+      conditions are reproducible on demand.
+- [ ] **Smooth** the residual reconciliation error: instead of snapping the local
+      ship to the replayed pose, decay the position/rotation error to zero over a
+      few frames (a shrinking render-offset), so a correction is felt as a gentle
+      pull, never a jump.
+- [ ] Tune `interpDelay` and the snapshot buffer against the simulator; define
+      graceful behavior on dropped snapshots (extrapolation window + clamp).
+- [ ] **Determinism audit:** an integration test that runs the same input stream
+      through two independent `World`s and asserts bit-for-bit equality — guards the
+      prediction contract the whole milestone rests on.
+- [ ] Document the failure modes and the constant behind each fix, so a cold
+      session understands *why* each number exists.
+
+**Out of scope:** projectile prediction (next), server-side lag
+compensation / hit rewind (Phase-2 polish — catalog §10), adaptive interpolation.
+
+**Playable end state:** with ~100ms latency + jitter + a few % loss simulated,
+your ship still feels instant and **never visibly snaps**; remote ships stay
+smooth; the error meter stays bounded and self-corrects. **Movement netcode is
+done.**
+
+---
+
+### M2.6 — Projectile / weapon prediction & reconciliation
+
+**Goal:** weapons fire **instantly** instead of waiting for a server round-trip.
+This is the direct fix for the *"laggy weapons"* regression.
+
+**Scope:**
+- [ ] On local fire, immediately spawn a **predicted projectile** in the predicted
+      world (reusing `firingSystem`), tagged `predicted` with `owner = localId` and
+      the input `seq` that produced it. Debit predicted energy/cooldown locally so
+      the HUD and fire-rate feel right.
+- [ ] **Reconciliation / matching:** when a snapshot arrives, match each predicted
+      projectile to its server-spawned twin (by owner + spawn seq/id) and **hand
+      off** to the authoritative entity, removing the predicted stand-in with no
+      visible pop. If the server never spawned it (rejected — e.g. it saw no
+      energy), **retract** the prediction.
+- [ ] Predicted projectiles are **replayed** in the prediction step alongside the
+      ship, so reconciliation never double-spawns them.
+- [ ] Only the **local** player's own shots are predicted; all other projectiles
+      come from snapshots and are interpolated (M2.2). **Hits and damage stay 100%
+      server-authoritative** — prediction is cosmetic-until-confirmed (no predicted
+      kills).
+- [ ] Debug HUD: live predicted-vs-reconciled projectile counts; flag
+      mispredictions.
+
+**Out of scope:** predicting damage/deaths, predicting items (repel/burst/mines —
+those predict, if ever, in M5), server-side lag-comp hit rewind.
+
+**Playable end state:** your bullets and bombs appear the **instant** you fire — no
+round-trip delay — and reconcile seamlessly to the server's authoritative shots
+with no visible duplication or pop. **Both named M2 regressions (laggy weapons,
+jittery ships) are now gone.**
+
+---
+
+### M2.7 — Identity, the server-side bot & join/leave polish → M2 complete
+
+**Goal:** tidy the multiplayer build into something two people can actually sit
+in, and move the M1 bot to where it belongs.
+
+**Scope:**
+- [ ] Move the combat bot **server-side**: it's just another player feeding
+      `InputCommand`s into the authoritative sim (it was always written
+      transport-agnostic — `sim/bot.ts`). Restores it as AI filler, now over the
+      net.
+- [ ] Player identity: name chosen client-side, sent in `hello`, shown on
+      debug-quality nametags with bounty + ping.
+- [ ] Robust join/leave: clean add/remove, the snapshot reflects the live roster,
+      no ghost ships; reconnect = a fresh join for now.
+- [ ] **Server owns spawn assignment** (`findSpawn` runs on the server); the client
+      never picks position.
+- [ ] Sanity caps: max players, input-rate clamp, snapshot-size sanity — minimal
+      abuse guards, not full anti-cheat.
+
+**Out of scope:** chat, polished UI/nametags (M3), accounts/persistence (Phase 2),
+AOI culling & stealth filtering (M5 fills the per-client seam built in M2.0),
+matchmaking.
+
+**Playable end state:** open two tabs (plus the server-side bot) → everyone joins
+one authoritative server → fight with **instant weapons**, **prediction-smooth**
+own-ship movement, and **smoothly interpolated** opponents, holding up under
+simulated latency/jitter/loss. **The project's biggest bet is de-risked; M3 can
+now build real UI on a proven transport.**
 
 ---
 
@@ -257,8 +531,10 @@ Sketched, not detailed — these get their own planning pass when Phase 1 is pro
 
 ## A note on milestone size
 
-M0–M2 are each likely a few focused sessions; M3–M6 are larger and will split
-into sub-sessions naturally (e.g. M5 is "status system" then one session per item
+M0–M1 are each likely a few focused sessions; **M2 is now explicitly split into
+eight sub-steps (M2.0–M2.7), one buildable slice per session**, because netcode is
+where collapsing concerns bites hardest. M3–M6 are larger and will split into
+sub-sessions naturally (e.g. M5 is "status system" then one session per item
 cluster). When you start a milestone, the first session's job is often to scaffold
 the system(s) and one vertical slice; later sessions fill in the riders. Keep each
 session ending on a runnable build.
