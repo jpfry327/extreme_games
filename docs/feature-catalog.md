@@ -196,15 +196,28 @@ the original **bitmap fonts in Pixi** (architecture §6).
 
 ## 10. Networking & infra (Phase 1)
 
-| Feature | Notes |
-|---|---|
-| Authoritative server @100Hz ✱ ⬜ | runs `sim/` headless |
-| Per-client snapshots ✱ ⬜ | `serializeSnapshotFor` (stealth/xradar/AOI filtering) |
-| Client prediction + reconciliation ⬜ | local player; needs deterministic sim |
-| Entity interpolation 🔶 | tick-interp machinery already exists |
-| Input transport ⬜ | `InputCommand` over WebSocket |
-| Lag compensation ⬜ | later polish |
-| Accounts / persistence / leaderboards 🔭 | Phase 2 |
+M2 is built as eight decoupled, individually playable slices (M2.0–M2.7) — the
+**Step** column maps each concern to its sub-step in [roadmap.md](roadmap.md).
+The slicing keeps the four netcode concerns (transport, interpolation, prediction,
+reconciliation) from collapsing into one step, which is what produced laggy
+weapons and jittery ships in the naive attempt.
+
+| Feature | Step | A — state | B/net | C — events | D — client | Notes |
+|---|---|---|---|---|---|---|
+| **Client/server world split** ✱ ⬜ | M2.0 | — | `Transport` iface + `LoopbackTransport`; server-world vs snapshot-fed client-world | — | renderer reads client world | the keystone refactor — stop sharing one `World` |
+| **Snapshot serialize/apply** ✱ ⬜ | M2.0 | Layer-A subset (players+projectiles+`tick`) | `serializeSnapshotFor(world, playerId)` / `applySnapshot` | — | — | per-client *signature* built now; returns everyone |
+| Stable entity ids ⬜ | M2.0 | `Projectile.id` (players already keyed) | snapshot diff/track | — | — | prereq for interp + projectile reconciliation |
+| **Authoritative server @100Hz** ✱ ⬜ | M2.1 | — | Node process runs `sim/` headless | — | — | snapshot send-rate decoupled from tick (~20–30Hz) |
+| Input transport ⬜ | M2.1 | — | `InputCommand` over WebSocket; `hello`/`welcome`, `net/protocol.ts` | — | — | own ship still lags by RTT here (expected) |
+| Entity interpolation 🔶 | M2.2 | snapshot buffer | render remotes ~`interpDelay` in past | — | lerp between 2 snapshots | generalizes existing `prevX/prevY` tick-interp |
+| Input sequencing + acks ⬜ | M2.3 | per-input `seq`, un-acked ring buffer | server input buffer; `lastProcessedInputSeq` ack | — | netcode debug HUD | plumbing only — no behavior change |
+| **Client prediction + reconciliation** ✱ ⬜ | M2.4 | predicted local world | reset-to-ack + replay un-acked inputs | — | local ship from predicted world | needs deterministic sim; error meter ≈0 |
+| Correction smoothing + net-sim ⬜ | M2.5 | render error-offset | in-transport latency/jitter/loss sim | — | decay residual error (no snap) | + determinism audit test (two `World`s agree) |
+| **Projectile / weapon prediction** ✱ ⬜ | M2.6 | `predicted` flag + spawn `seq` | predicted shot reconciled to server twin | `weaponFired` | instant local shots | damage stays server-authoritative (no predicted kills) |
+| Server-side bot + join/leave ⬜ | M2.7 | roster | bot feeds `InputCommand`s server-side; server owns spawn | — | nametags + ping | bot becomes AI filler over the net |
+| Per-client snapshot filtering ✱ ⬜ | M5 | `status` (stealth/cloak/xradar) | fills the per-client seam from M2.0 (stealth/xradar/AOI culling) | — | — | server-enforced visibility (architecture §5.1) |
+| Lag compensation 🔭 | later | — | server-side hit rewind | — | — | polish, after Phase 1 |
+| Accounts / persistence / leaderboards 🔭 | Phase 2 | — | — | — | — | — |
 
 **Explicitly out of scope:** the original VIE/Continuum **encryption + wire
 protocol** (we use our own WebSocket protocol — see README), map/LVZ downloading,
