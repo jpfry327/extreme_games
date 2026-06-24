@@ -1,10 +1,16 @@
 /**
- * Wire protocol v0 — M2.1 message shapes for client↔server communication.
+ * Wire protocol v0 — M2.1 / M2.3 message shapes for client↔server communication.
  *
  * JSON framing for now; binary is a later optimization. Three message types
- * cover the full M2.1 lifecycle: handshake (hello/welcome), input streaming,
- * and state delivery (snapshot). Chat, items, and ship-change will extend
- * ClientMsg in later milestones.
+ * cover the lifecycle: handshake (hello/welcome), input streaming, and state
+ * delivery (snapshot). Chat, items, and ship-change will extend ClientMsg in
+ * later milestones.
+ *
+ * M2.3 introduces the **fixed-tick input model**: the client produces exactly
+ * one command per 10ms sim tick (not one per render frame), stamps each with a
+ * monotonic `seq`, and sends every one. The server consumes them in order, one
+ * per tick, and acks the highest `seq` it has processed in each snapshot. This
+ * is the data plane client prediction & reconciliation (M2.4) will ride on.
  */
 
 import type { InputCommand, PlayerId } from "../sim/types";
@@ -18,11 +24,31 @@ export interface HelloMsg {
   name: string;
 }
 
-/** One input sample per render frame, sent immediately after keyboard sampling.
- *  The server applies the latest buffered input on the next sim step. */
+/**
+ * One player command, stamped for sequencing (M2.3). The client produces one
+ * per sim tick and never drops them, so the server sees a continuous, ordered
+ * command stream.
+ *
+ * - `seq`        — monotonic per client, starting at 1. The unit the server
+ *                  acks and the client keys its un-acked ring buffer by.
+ * - `clientTick` — the client sim tick this command was sampled for. Carried
+ *                  for M2.4 (mapping replayed inputs back to ticks) and the
+ *                  debug overlay's client-tick vs server-tick readout. In M2.3
+ *                  it equals `seq` (one command per tick), but they are kept
+ *                  distinct because the two counters diverge once prediction
+ *                  resends / reorders inputs.
+ */
+export interface SequencedInput {
+  seq: number;
+  clientTick: number;
+  cmd: InputCommand;
+}
+
+/** A single sequenced command. Sent once per sim tick, immediately — coalesced
+ *  render frames still emit every tick's command so the stream has no gaps. */
 export interface InputMsg {
   type: "input";
-  cmd: InputCommand;
+  input: SequencedInput;
 }
 
 export type ClientMsg = HelloMsg | InputMsg;

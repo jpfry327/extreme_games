@@ -11,8 +11,11 @@ import type { World } from "./world";
  * `advance()` returns an interpolation alpha in [0,1): how far we are between the
  * last completed tick and the next one, so the renderer can smoothly blend poses.
  *
- * The same `StepContext` is applied to every tick we run this frame — the client
- * sampled input once for the frame, and all the catch-up ticks share that intent.
+ * The context is built **per tick** via `buildCtx`, not once per frame: under the
+ * M2.3 fixed-tick input model the server consumes one buffered command per tick
+ * per player, so each catch-up tick this frame needs its own fresh context (and
+ * lets the bot re-read the world it just changed). A caller that has a single
+ * intent for the whole frame simply returns the same context each call.
  */
 export class FixedLoop {
   private accumulator = 0;
@@ -20,11 +23,11 @@ export class FixedLoop {
 
   constructor(private readonly world: World) {}
 
-  advance(dtSeconds: number, ctx: StepContext): number {
+  advance(dtSeconds: number, buildCtx: () => StepContext): number {
     this.accumulator += Math.min(dtSeconds, FixedLoop.MAX_FRAME);
 
     while (this.accumulator >= TICK_DT) {
-      this.world.step(ctx);
+      this.world.step(buildCtx());
       this.accumulator -= TICK_DT;
     }
 

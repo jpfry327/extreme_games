@@ -11,9 +11,9 @@
  *   5. Incoming `snapshot` messages are forwarded to the registered handler.
  */
 
-import type { InputCommand, PlayerId } from "../sim/types";
+import type { PlayerId } from "../sim/types";
 import type { Transport, SnapshotHandler } from "./transport";
-import type { ClientMsg, ServerMsg } from "./protocol";
+import type { ClientMsg, SequencedInput, ServerMsg } from "./protocol";
 
 export class WebSocketTransport implements Transport {
   private socket: WebSocket | null = null;
@@ -57,9 +57,9 @@ export class WebSocketTransport implements Transport {
     });
   }
 
-  sendInput(cmd: InputCommand): void {
+  sendInput(input: SequencedInput): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-    this.send({ type: "input", cmd });
+    this.send({ type: "input", input });
   }
 
   setSnapshotHandler(cb: SnapshotHandler): void {

@@ -7,17 +7,18 @@ import { World } from "./sim/world";
 import { Renderer } from "./render/renderer";
 import { WebSocketTransport } from "./net/WebSocketTransport";
 import { SnapshotInterpolator } from "./net/interpolation";
+import { ClientInputManager } from "./net/clientInput";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
-// above for these three and uncomment the loopback block below:
-//   import { GameServer, BOT_PLAYER_ID } from "./net/server";
+// above for these two and uncomment the loopback block below:
+//   import { GameServer } from "./net/server";
 //   import { LoopbackTransport } from "./net/transport";
-//   import { computeBotInput } from "./sim/bot";
 
 async function main() {
   const mount = document.getElementById("app")!;
   const hud = document.getElementById("hud")!;
   const killfeed = document.getElementById("killfeed")!;
+  const netdebug = document.getElementById("netdebug")!;
 
   // 1. Load the map.
   const map = await loadMap();
@@ -27,6 +28,13 @@ async function main() {
   //    the past so they glide instead of snapping at the 20Hz broadcast rate.
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
+
+  // Input sequencing (M2.3): produces one stamped command per 10ms sim tick and
+  // holds the un-acked ring buffer. Snapshots ack by seq; prediction (M2.4) will
+  // replay the survivors. Nothing is corrected yet — this is the data plane only.
+  const inputMgr = new ClientInputManager();
+  // Latest server-reported input-queue depth for us (debug overlay only).
+  let serverInputDepth = 0;
 
   // 3. Input + renderer — initialize NOW so the canvas is on screen while we
   //    connect. The game loop starts immediately in "connecting…" mode.
@@ -65,7 +73,14 @@ async function main() {
 
   // Buffer each snapshot with its arrival time; the interpolator consumes the
   // buffer at render time. (M2.0 applied snapshots directly — that snapped.)
-  transport.setSnapshotHandler((snap) => interp.push(snap, performance.now()));
+  // Also process the M2.3 ack: drop acked inputs + update RTT, and record the
+  // server-side queue depth for the overlay.
+  transport.setSnapshotHandler((snap) => {
+    const now = performance.now();
+    interp.push(snap, now);
+    inputMgr.ack(snap.lastProcessedInputSeq, now);
+    serverInputDepth = snap.inputBufferDepth;
+  });
 
   // `connected` flips true once the server sends `welcome` and we know our
   // PlayerId. The render loop runs in "connecting…" mode until then.
@@ -94,12 +109,15 @@ async function main() {
       return;
     }
 
-    transport.sendInput(keyboard.sample());
+    // Produce one stamped command per elapsed sim tick (not per render frame)
+    // and send every one, so the server gets a continuous, ordered stream.
+    for (const input of inputMgr.produce(dt, keyboard.sample(), now)) {
+      transport.sendInput(input);
+    }
 
-    // --- loopback only: advance the in-process server + feed the bot ---
+    // --- loopback only: advance the in-process server (bot runs server-side) ---
     // const alpha = server.advance(dt);
-    // transport.sendInputAs(BOT_PLAYER_ID, computeBotInput(view, BOT_PLAYER_ID));
-    // --------------------------------------------------------------------
+    // --------------------------------------------------------------------------
 
     // Rebuild the view world from buffered snapshots: remote ships/bullets are
     // interpolated ~interpDelay in the past (smooth); the local ship is pinned
@@ -140,6 +158,20 @@ async function main() {
         `${me.combat.kills}-${me.combat.deaths} (K-D)\n` +
         `projectiles ${view.projectiles.length}`;
     }
+
+    // Netcode debug overlay (M2.3) — the verification tool for M2.4–M2.6.
+    // `view.tick` is the newest snapshot's server tick; the client tick is our
+    // own input clock. Their gap = how far ahead the client is sampling. The
+    // server buffer depth should sit at a small steady value (one snapshot's
+    // worth of commands); ~0 means starvation, a growing number means lag.
+    netdebug.textContent =
+      `── netcode (M2.3) ──\n` +
+      `rtt ${inputMgr.rttMs.toFixed(0)}ms (ack)\n` +
+      `acked seq ${inputMgr.lastAckedSeq}\n` +
+      `client tick ${inputMgr.clientTickCount}\n` +
+      `server tick ${view.tick}\n` +
+      `input buf (server) ${serverInputDepth}\n` +
+      `un-acked (client) ${inputMgr.pendingCount}`;
 
     requestAnimationFrame(frame);
   }

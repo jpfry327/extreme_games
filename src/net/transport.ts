@@ -11,7 +11,8 @@
  * server can call `deliverSnapshot` on it directly.
  */
 
-import type { InputCommand, PlayerId } from "../sim/types";
+import type { PlayerId } from "../sim/types";
+import type { SequencedInput } from "./protocol";
 import { type ClientConnection, type GameServer } from "./server";
 import type { Snapshot } from "./snapshot";
 
@@ -19,8 +20,8 @@ export type SnapshotHandler = (snap: Snapshot) => void;
 
 /** The client-side view of the transport. One instance per client session. */
 export interface Transport {
-  /** Send the local player's intent for this tick to the server. */
-  sendInput(cmd: InputCommand): void;
+  /** Send one sequenced command (one per sim tick) to the server (M2.3). */
+  sendInput(input: SequencedInput): void;
   /** Register the callback that receives each incoming snapshot. */
   setSnapshotHandler(cb: SnapshotHandler): void;
   start(): void;
@@ -32,9 +33,9 @@ export interface Transport {
  * model before any sockets exist. The `GameServer.advance()` call delivers the
  * snapshot synchronously by calling `deliverSnapshot` on this object.
  *
- * `sendInputAs` is a loopback-only escape hatch for feeding the M1 bot from
- * main.ts. It is NOT on the `Transport` interface (real clients can only send
- * their own input). The bot moves server-side in M2.7 and this method goes away.
+ * The bot is computed server-side inside `GameServer` (it always was just
+ * another player feeding the sim), so the loopback only ever sends the local
+ * player's own sequenced input — same contract as the real socket.
  */
 export class LoopbackTransport implements Transport, ClientConnection {
   private snapshotHandler: SnapshotHandler | null = null;
@@ -47,18 +48,9 @@ export class LoopbackTransport implements Transport, ClientConnection {
     server.connectClient(this);
   }
 
-  /** Send the local player's input to the server. */
-  sendInput(cmd: InputCommand): void {
-    this.server.enqueueInput(this.localPlayerId, cmd);
-  }
-
-  /**
-   * Inject input for any player id — loopback only, not on `Transport`.
-   * Used to route the M1 bot's AI-computed inputs into the server until
-   * the bot moves server-side in M2.7.
-   */
-  sendInputAs(playerId: PlayerId, cmd: InputCommand): void {
-    this.server.enqueueInput(playerId, cmd);
+  /** Send the local player's sequenced command to the server. */
+  sendInput(input: SequencedInput): void {
+    this.server.enqueueInput(this.localPlayerId, input);
   }
 
   setSnapshotHandler(cb: SnapshotHandler): void {
