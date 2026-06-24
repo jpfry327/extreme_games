@@ -71,10 +71,18 @@ export class GameServer {
    * `FixedLoop.advance`) and broadcast a snapshot to every connected client.
    * Returns the interpolation alpha so the caller can pass it to the renderer.
    *
+   * Events are cleared at the top of each advance so each snapshot carries only
+   * the events produced *this frame*. The previous frame's events were already
+   * captured in the last snapshot and delivered to clients.
+   *
    * In M2.0 this is called once per render frame; the loopback transport delivers
    * snapshots synchronously inside this call before it returns.
    */
   advance(dtSeconds: number): number {
+    // Clear events from the previous frame before ticking. The sim accumulates
+    // new events during step(); the snapshot below captures them fresh.
+    this.world.events.length = 0;
+
     const ctx: StepContext = { inputs: new Map(this.inputBuffer) };
     const alpha = this.loop.advance(dtSeconds, ctx);
 
