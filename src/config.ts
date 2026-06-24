@@ -164,3 +164,14 @@ export const COMBAT = {
    *  EG runs this at 0 (score is purely the victim's bounty). */
   killPointsBase: 0,
 } as const;
+
+// --- Networking (M2) ---------------------------------------------------------
+// Client-side netcode tuning. The server's port + broadcast rate live in
+// server/index.ts; these are values the browser client needs.
+export const NET = {
+  /** How far in the past (ms) remote entities are rendered, so the client always
+   *  has two buffered snapshots straddling render time to interpolate between.
+   *  ~100ms ≈ two snapshots at the 20Hz broadcast rate. Bigger = smoother under
+   *  jitter but more visible lag on other ships. (roadmap M2.2 / architecture §5.2) */
+  interpDelayMs: 100,
+} as const;
