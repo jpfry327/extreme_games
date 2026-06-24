@@ -2,13 +2,17 @@ import { TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
-import { computeBotInput } from "./sim/bot";
 import { isAlive } from "./sim/player";
 import { World } from "./sim/world";
 import { Renderer } from "./render/renderer";
-import { GameServer, BOT_PLAYER_ID } from "./net/server";
-import { LoopbackTransport } from "./net/transport";
+import { WebSocketTransport } from "./net/WebSocketTransport";
 import { applySnapshot } from "./net/snapshot";
+
+// To run without a server (in-process loopback, M2.0 mode), swap the import
+// above for these three and uncomment the loopback block below:
+//   import { GameServer, BOT_PLAYER_ID } from "./net/server";
+//   import { LoopbackTransport } from "./net/transport";
+//   import { computeBotInput } from "./sim/bot";
 
 async function main() {
   const mount = document.getElementById("app")!;
@@ -18,45 +22,58 @@ async function main() {
   // 1. Load the map.
   const map = await loadMap();
 
-  // 2. Spin up the in-process authoritative server. It owns the World + FixedLoop
-  //    and is the single source of truth for all game state.
-  const server = new GameServer(map);
-  server.authoritativeWorld.localPlayer.name = "fecundity";
-
-  // 3. Create the client world — a read-only mirror populated exclusively by
-  //    applySnapshot. The renderer reads this; the sim never steps it.
-  //    `addLocalPlayer = false` so we start empty; the snapshot fills it in.
+  // 2. Create the client world — snapshot-driven, never stepped by the client.
   const clientWorld = new World(map, 1, false);
 
-  // 4. Loopback transport: keyboard → server; server snapshot → clientWorld.
-  const transport = new LoopbackTransport(server, server.localPlayerId);
-  transport.setSnapshotHandler((snap) => applySnapshot(clientWorld, snap));
-
-  // 5. Input + renderer.
+  // 3. Input + renderer — initialize NOW so the canvas is on screen while we
+  //    connect. The game loop starts immediately in "connecting…" mode.
   const keyboard = new Keyboard();
 
-  // Press F to toggle fullscreen (which also enables keyboard lock on Chromium,
-  // letting us try to capture Ctrl+arrows from macOS Mission Control).
   window.addEventListener("keydown", (e) => {
     if (e.code === "KeyF") toggleFullscreen(mount).catch(console.error);
   });
   if (!keyboardLockSupported()) {
     console.info(
-      "Keyboard Lock API not available in this browser (Chromium-only); " +
-        "Ctrl+arrows may still trigger OS shortcuts. Use Space to fire.",
+      "Keyboard Lock API not available (Chromium-only); " +
+        "Ctrl+arrows may trigger OS shortcuts. Use Space to fire.",
     );
   }
 
   const renderer = new Renderer();
   await renderer.init(mount, map);
-
-  // A throwaway kill feed: the real bitmap-font version arrives with the UI
-  // toolkit in M3. For now we render recent kill lines into a DOM overlay.
   const feed = new KillFeed(killfeed);
 
-  // 6. The render/animation loop. Sample input, send to server, advance the
-  //    authoritative sim, then draw the client world (which was just updated
-  //    synchronously by the snapshot handler).
+  // 4. Connect to the authoritative server over WebSocket.
+  //    The Vite dev proxy routes /ws → ws://localhost:3000 (see vite.config.ts).
+  //    Run `npm run server` in a separate terminal before opening the browser.
+  //
+  //    To swap back to in-process loopback (no server needed), replace these
+  //    four lines with the loopback block commented out below.
+  const transport = new WebSocketTransport(
+    `ws://${location.host}/ws`,
+    "fecundity",
+  );
+
+  // --- loopback alternative (no server needed) ---
+  // const server = new GameServer(map);
+  // server.authoritativeWorld.localPlayer.name = "fecundity";
+  // const transport = new LoopbackTransport(server, server.localPlayerId);
+  // ------------------------------------------------
+
+  transport.setSnapshotHandler((snap) => applySnapshot(clientWorld, snap));
+
+  // `connected` flips true once the server sends `welcome` and we know our
+  // PlayerId. The render loop runs in "connecting…" mode until then.
+  let connected = false;
+  transport.onConnected = (playerId) => {
+    clientWorld.localPlayerId = playerId;
+    connected = true;
+    console.info(`[client] connected as ${playerId}`);
+  };
+  transport.start();
+
+  // 5. Render loop. Starts immediately — even before the server replies — so
+  //    the canvas is live and the "connecting…" HUD is visible right away.
   let last = performance.now();
   let fpsAccum = 0;
   let fpsFrames = 0;
@@ -66,25 +83,25 @@ async function main() {
     const dt = (now - last) / 1000;
     last = now;
 
-    // Send the local player's intent.
+    if (!connected) {
+      hud.textContent = "connecting…";
+      requestAnimationFrame(frame);
+      return;
+    }
+
     transport.sendInput(keyboard.sample());
 
-    // Bot AI reads the client world (last snapshot — zero-latency loopback so
-    // it's identical to the server world). Route bot input via the loopback
-    // escape hatch until the bot moves server-side in M2.7.
-    transport.sendInputAs(BOT_PLAYER_ID, computeBotInput(clientWorld, BOT_PLAYER_ID));
+    // --- loopback only: advance the in-process server + feed the bot ---
+    // const alpha = server.advance(dt);
+    // transport.sendInputAs(BOT_PLAYER_ID, computeBotInput(clientWorld, BOT_PLAYER_ID));
+    // --------------------------------------------------------------------
 
-    // Advance the authoritative sim. The snapshot handler fires synchronously
-    // inside this call, so clientWorld is up-to-date by the time we return.
-    const alpha = server.advance(dt);
+    // Draw from the client world. Every pixel has passed through the
+    // serialize → deserialize round-trip (snapshot from the server).
+    // Own ship visibly lags RTT in M2.1; M2.4 adds prediction to fix that.
+    renderer.draw(clientWorld, 1, dt);
 
-    // Draw from the client world — every pixel on screen has passed through the
-    // serialize → deserialize round-trip. If it plays like M1, the seam is correct.
-    renderer.draw(clientWorld, alpha, dt);
-
-    // Drain events: the snapshot handler populated clientWorld.events from the
-    // server's events for this tick. Kill-feed and renderer both consume them;
-    // main.ts owns the clear so every consumer sees them (architecture §4).
+    // Drain events piggybacked on the snapshot.
     for (const e of clientWorld.events) {
       if (e.type === "shipDied")
         feed.add(killLine(clientWorld, e.killer, e.victim), now);
@@ -92,7 +109,7 @@ async function main() {
     clientWorld.events.length = 0;
     feed.render(now);
 
-    // HUD (updated a few times a second).
+    // HUD.
     fpsAccum += dt;
     fpsFrames++;
     if (fpsAccum >= 0.25) {
@@ -122,15 +139,12 @@ async function main() {
   requestAnimationFrame(frame);
 }
 
-/** Build a kill-feed line from a death event, looking names up on the world. */
 function killLine(world: World, killer: string | null, victim: string): string {
   const name = (id: string) => world.players.get(id)?.name ?? id;
   if (killer && killer !== victim) return `${name(killer)} killed ${name(victim)}`;
   return `${name(victim)} was destroyed`;
 }
 
-/** A tiny self-expiring kill feed rendered into a DOM element. Throwaway until
- *  M3's bitmap-font UI replaces it. */
 class KillFeed {
   private static readonly TTL_MS = 5000;
   private static readonly MAX_LINES = 5;

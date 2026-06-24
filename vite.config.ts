@@ -8,5 +8,11 @@ export default defineConfig({
   publicDir: "assets",
   server: {
     open: true,
+    proxy: {
+      "/ws": {
+        target: "ws://localhost:3000",
+        ws: true,
+      },
+    },
   },
 });
