@@ -45,12 +45,24 @@
         pointer-events: none;
         text-shadow: 0 0 3px #000;
       }
+      #netdebug {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        text-align: right;
+        color: #6cf;
+        font: 11px/1.4 monospace;
+        white-space: pre;
+        pointer-events: none;
+        text-shadow: 0 0 2px #000;
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <div id="hud"></div>
     <div id="killfeed"></div>
+    <div id="netdebug"></div>
     <div id="help">arrows: rotate / thrust &nbsp;•&nbsp; Z (or ctrl): fire &nbsp;•&nbsp; Tab: bomb &nbsp;•&nbsp; shift: afterburner &nbsp;•&nbsp; F: fullscreen</div>
     <script type="module" src="/src/main.ts"></script>
   </body>

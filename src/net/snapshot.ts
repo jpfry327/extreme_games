@@ -18,6 +18,19 @@
 import type { GameEvent, Player, PlayerId, Projectile } from "../sim/types";
 import type { World } from "../sim/world";
 
+/** The per-recipient input ack the server stamps onto each snapshot (M2.3).
+ *  Kept as a small struct so `serializeSnapshotFor` callers pass it explicitly
+ *  rather than reaching into server-only state. */
+export interface InputAck {
+  /** The highest input `seq` from the recipient the server has processed. The
+   *  client drops acked inputs and (M2.4) replays the rest from here. */
+  lastProcessedInputSeq: number;
+  /** Un-consumed commands queued server-side for the recipient. A debug-HUD
+   *  health signal: a deep buffer = added latency, an empty one = starvation
+   *  (the server is repeating their last command). */
+  inputBufferDepth: number;
+}
+
 export interface Snapshot {
   tick: number;
   players: Player[];
@@ -25,19 +38,28 @@ export interface Snapshot {
   /** Events from the ticked step, piggybacked on the snapshot for the loopback
    *  case. A real network protocol separates these (architecture §5). */
   events: GameEvent[];
+  /** M2.3 ack — see InputAck. The data plane for prediction (M2.4); the client
+   *  only inspects it (debug overlay) for now, it corrects nothing yet. */
+  lastProcessedInputSeq: number;
+  inputBufferDepth: number;
 }
 
 /**
  * Produce a deep-copied snapshot for the given player. `structuredClone`
  * simulates the serialize→deserialize round-trip that a real wire would do,
  * ensuring neither side can alias into the other's state.
+ *
+ * `ack` is the recipient's input-processing state (M2.3); it's per-client, like
+ * the snapshot itself, so it's passed in rather than read from the shared world.
  */
-export function serializeSnapshotFor(world: World, _playerId: PlayerId): Snapshot {
+export function serializeSnapshotFor(world: World, _playerId: PlayerId, ack: InputAck): Snapshot {
   return structuredClone({
     tick: world.tick,
     players: [...world.players.values()],
     projectiles: world.projectiles,
     events: world.events,
+    lastProcessedInputSeq: ack.lastProcessedInputSeq,
+    inputBufferDepth: ack.inputBufferDepth,
   });
 }
 

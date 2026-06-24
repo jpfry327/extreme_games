@@ -13,9 +13,12 @@
 
 import { WARBIRD } from "../config";
 import { FixedLoop } from "../sim/loop";
+import { computeBotInput } from "../sim/bot";
 import type { PlayerId, StepContext, InputCommand } from "../sim/types";
 import { LOCAL_PLAYER_ID, World } from "../sim/world";
 import type { GameMap } from "../sim/gamemap";
+import type { SequencedInput } from "./protocol";
+import { ServerInputBuffer } from "./serverInput";
 import { serializeSnapshotFor, type Snapshot } from "./snapshot";
 
 /** The M1 bot — stays a second player driven by AI until M2.7 moves it here
@@ -39,7 +42,8 @@ export interface ClientConnection {
 export class GameServer {
   private readonly world: World;
   private readonly loop: FixedLoop;
-  private readonly inputBuffer = new Map<PlayerId, InputCommand>();
+  /** Per-player sequenced input queues (M2.3), consumed one command per tick. */
+  private readonly inputs = new ServerInputBuffer();
   private clients: ClientConnection[] = [];
 
   constructor(map: GameMap) {
@@ -59,11 +63,21 @@ export class GameServer {
     this.clients = this.clients.filter((c) => c !== client);
   }
 
-  /** Buffer an input command for a player. The server applies buffered inputs on
-   *  the next advance() call. Each player's latest input overwrites any earlier
-   *  one from the same frame (last-write-wins within a render frame). */
-  enqueueInput(playerId: PlayerId, cmd: InputCommand): void {
-    this.inputBuffer.set(playerId, cmd);
+  /** Buffer a sequenced command for a player (M2.3). The step provider consumes
+   *  one per tick in seq order; this never drops or coalesces commands. */
+  enqueueInput(playerId: PlayerId, input: SequencedInput): void {
+    this.inputs.push(playerId, input);
+  }
+
+  /** Build one tick's context: pull a buffered command per human (repeat-last on
+   *  a gap) and compute the bot from the current world — the state left by the
+   *  previous tick, since buildCtx is evaluated before step() runs. */
+  private buildCtx(): StepContext {
+    const map = new Map<PlayerId, InputCommand>();
+    for (const id of this.world.players.keys()) {
+      map.set(id, id === BOT_PLAYER_ID ? computeBotInput(this.world, id) : this.inputs.next(id));
+    }
+    return { inputs: map };
   }
 
   /**
@@ -83,11 +97,13 @@ export class GameServer {
     // new events during step(); the snapshot below captures them fresh.
     this.world.events.length = 0;
 
-    const ctx: StepContext = { inputs: new Map(this.inputBuffer) };
-    const alpha = this.loop.advance(dtSeconds, ctx);
+    const alpha = this.loop.advance(dtSeconds, () => this.buildCtx());
 
     for (const client of this.clients) {
-      const snap = serializeSnapshotFor(this.world, client.localPlayerId);
+      const snap = serializeSnapshotFor(this.world, client.localPlayerId, {
+        lastProcessedInputSeq: this.inputs.ack(client.localPlayerId),
+        inputBufferDepth: this.inputs.depth(client.localPlayerId),
+      });
       client.deliverSnapshot(snap);
     }
 

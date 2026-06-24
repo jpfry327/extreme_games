@@ -23,6 +23,7 @@ import { WARBIRD, TICK_DT } from "../src/config";
 import { World } from "../src/sim/world";
 import { FixedLoop } from "../src/sim/loop";
 import { serializeSnapshotFor } from "../src/net/snapshot";
+import { ServerInputBuffer } from "../src/net/serverInput";
 import { computeBotInput } from "../src/sim/bot";
 import type { InputCommand, PlayerId, StepContext } from "../src/sim/types";
 import type { ClientMsg, ServerMsg } from "../src/net/protocol";
@@ -43,7 +44,10 @@ const loop = new FixedLoop(world);
 // Seed the server with one bot so a solo player has someone to fight.
 // The bot is just another player whose InputCommands come from the AI, not a socket.
 world.addPlayer(BOT_ID, "ChaosBot", 1, WARBIRD);
-const inputBuffer = new Map<PlayerId, InputCommand>();
+
+// Per-player sequenced input queues (M2.3). Consumed one command per tick in
+// the step provider below; acked back to each client in its snapshot.
+const inputs = new ServerInputBuffer();
 
 // ---------- client registry ---------------------------------------------------
 
@@ -61,7 +65,10 @@ function send(ws: WebSocket, msg: ServerMsg): void {
 
 function broadcast(): void {
   for (const s of sessions) {
-    const snap = serializeSnapshotFor(world, s.playerId);
+    const snap = serializeSnapshotFor(world, s.playerId, {
+      lastProcessedInputSeq: inputs.ack(s.playerId),
+      inputBufferDepth: inputs.depth(s.playerId),
+    });
     send(s.ws, { type: "snapshot", snap });
   }
 }
@@ -85,14 +92,14 @@ wss.on("connection", (ws) => {
       send(ws, { type: "welcome", playerId });
       console.info(`[+] ${msg.name} → ${playerId}  (${sessions.length} connected)`);
     } else if (msg.type === "input" && session) {
-      inputBuffer.set(session.playerId, msg.cmd);
+      inputs.push(session.playerId, msg.input);
     }
   });
 
   ws.on("close", () => {
     if (!session) return;
     world.players.delete(session.playerId);
-    inputBuffer.delete(session.playerId);
+    inputs.remove(session.playerId);
     const i = sessions.indexOf(session);
     if (i !== -1) sessions.splice(i, 1);
     console.info(`[-] ${session.name} (${session.playerId}) left  (${sessions.length} connected)`);
@@ -107,19 +114,28 @@ wss.on("connection", (ws) => {
 let last = performance.now();
 let ticksSinceBroadcast = 0;
 
+// Build the per-tick step context: pull one buffered command per human player
+// (repeating their last on a gap), and compute the bot from the current world —
+// i.e. the state left by the previous tick (buildCtx runs before step). Called
+// once per sim tick by FixedLoop, so a frame covering several ticks consumes
+// several queued commands, in order.
+function buildCtx(): StepContext {
+  const map = new Map<PlayerId, InputCommand>();
+  for (const id of world.players.keys()) {
+    map.set(id, id === BOT_ID ? computeBotInput(world, id) : inputs.next(id));
+  }
+  return { inputs: map };
+}
+
 setInterval(() => {
   const now = performance.now();
   const dt = (now - last) / 1000;
   last = now;
 
-  // Bot AI: compute and buffer the bot's input before each step.
-  inputBuffer.set(BOT_ID, computeBotInput(world, BOT_ID));
-
   // Clear events from the previous step before ticking.
   world.events.length = 0;
 
-  const ctx: StepContext = { inputs: new Map(inputBuffer) };
-  loop.advance(dt, ctx);
+  loop.advance(dt, buildCtx);
 
   ticksSinceBroadcast++;
   if (ticksSinceBroadcast >= BROADCAST_EVERY) {
