@@ -46,6 +46,9 @@ async function main() {
   const smoother = new ReconciliationSmoother();
   // Latest server-reported input-queue depth for us (debug overlay only).
   let serverInputDepth = 0;
+  // Latest server-measured RTT (ms) per player, from the snapshot — drives the
+  // ping shown on nametags (M2.7).
+  let latestPings: Record<string, number> = {};
   // Newest snapshot tick we've accepted. Jitter (esp. with the network sim) can
   // deliver snapshots out of order; an older-tick snapshot is stale — we already
   // have something newer — so it's dropped to keep the buffer monotonic and stop
@@ -76,10 +79,7 @@ async function main() {
   //
   //    To swap back to in-process loopback (no server needed), replace these
   //    four lines with the loopback block commented out below.
-  const socket = new WebSocketTransport(
-    `ws://${location.host}/ws`,
-    "fecundity",
-  );
+  const socket = new WebSocketTransport(`ws://${location.host}/ws`, resolvePlayerName());
 
   // --- loopback alternative (no server needed) ---
   // const server = new GameServer(map);
@@ -126,16 +126,24 @@ async function main() {
       inputMgr.ack(snap.lastProcessedInputSeq, now);
     }
     serverInputDepth = snap.inputBufferDepth;
+    latestPings = snap.pings;
   });
 
   // `connected` flips true once the server sends `welcome` and we know our
   // PlayerId. The render loop runs in "connecting…" mode until then. The
   // handshake is on the raw socket, so simulated loss never blocks a join.
   let connected = false;
+  let rejected: string | null = null;
   socket.onConnected = (playerId) => {
     view.localPlayerId = playerId;
     connected = true;
     console.info(`[client] connected as ${playerId}`);
+  };
+  // M2.7: the server can refuse a join (e.g. arena full). Surface it in the HUD
+  // instead of hanging in "connecting…".
+  socket.onRejected = (reason) => {
+    rejected = reason;
+    console.warn(`[client] join rejected: ${reason}`);
   };
   transport.start();
 
@@ -153,6 +161,10 @@ async function main() {
     const dt = (now - last) / 1000;
     last = now;
 
+    if (rejected) {
+      hud.textContent = `Couldn't join: ${rejected}`;
+      return; // stop the loop — the server closed the socket
+    }
     if (!connected) {
       hud.textContent = "connecting…";
       requestAnimationFrame(frame);
@@ -190,7 +202,7 @@ async function main() {
       for (const p of predictor.predictedProjectiles) view.projectiles.push(p);
     }
 
-    renderer.draw(view, 1, dt);
+    renderer.draw(view, 1, dt, latestPings);
 
     // Drain events the interpolator released (in interpolated time) this frame.
     for (const e of view.events) {
@@ -250,6 +262,42 @@ async function main() {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+}
+
+/**
+ * Resolve the local player's name client-side (M2.7), sent to the server in the
+ * `hello` handshake. Precedence: an explicit `?name=` query param wins (handy for
+ * opening two differently-named tabs), then a previously stored choice, then a
+ * one-time prompt, falling back to a random `Player-NNNN` if the user dismisses
+ * it. The chosen name is persisted so refreshes keep the same identity. The
+ * polished in-game name entry is M3 (the bitmap-font UI toolkit); this is the
+ * deliberately minimal debug-quality version.
+ */
+function resolvePlayerName(): string {
+  const clamp = (s: string) => s.trim().slice(0, 20);
+
+  const fromQuery = new URLSearchParams(location.search).get("name");
+  if (fromQuery && clamp(fromQuery)) {
+    const name = clamp(fromQuery);
+    localStorage.setItem("playerName", name);
+    return name;
+  }
+
+  const stored = localStorage.getItem("playerName");
+  if (stored && clamp(stored)) return clamp(stored);
+
+  const fallback = `Player-${Math.floor(1000 + Math.random() * 9000)}`;
+  // `prompt` throws in sandboxed/embedded contexts (e.g. some preview iframes);
+  // fall back to a random name there rather than crashing the client.
+  let entered: string | null = null;
+  try {
+    entered = window.prompt("Choose your name:", fallback);
+  } catch {
+    entered = null;
+  }
+  const name = entered && clamp(entered) ? clamp(entered) : fallback;
+  localStorage.setItem("playerName", name);
+  return name;
 }
 
 function killLine(world: World, killer: string | null, victim: string): string {

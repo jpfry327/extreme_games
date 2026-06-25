@@ -108,8 +108,9 @@ export class Renderer {
   }
 
   /** Draw one frame, blending between the last two sim ticks by `alpha`.
-   *  `dtSeconds` is the real frame time, used to drive the cosmetic effects. */
-  draw(world: World, alpha: number, dtSeconds: number): void {
+   *  `dtSeconds` is the real frame time, used to drive the cosmetic effects.
+   *  `pings` is the server-measured RTT-by-player map shown on nametags (M2.7). */
+  draw(world: World, alpha: number, dtSeconds: number, pings: Record<string, number> = {}): void {
     const local = world.players.get(world.localPlayerId)?.kinematics;
     if (!local) return; // snapshot hasn't arrived yet; nothing to render
     const sw = this.app.screen.width;
@@ -129,7 +130,7 @@ export class Renderer {
     this.drawPlayers(world, alpha);
     this.drawProjectiles(world, alpha);
     this.drawEffects(world, alpha, dtSeconds * 1000);
-    this.nametags.update(world, alpha);
+    this.nametags.update(world, alpha, pings);
   }
 
   /** Draw every player's ship, growing the sprite pool to fit. Each sprite is

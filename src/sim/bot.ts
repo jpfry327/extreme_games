@@ -1,6 +1,15 @@
 import { isAlive } from "./player";
-import type { InputCommand, Player } from "./types";
+import type { InputCommand, Player, PlayerId } from "./types";
 import type { World } from "./world";
+
+/** The combat bot's stable player id and display name. Defined here, next to the
+ *  AI that drives it, so every server that seeds a bot (the headless
+ *  server/index.ts and the in-process net/server.ts loopback) shares one id —
+ *  the bot is just another player feeding InputCommands into the authoritative
+ *  sim, and `buildCtx` keys off this id to source its input from `computeBotInput`
+ *  instead of a socket queue (M2.7). */
+export const BOT_ID: PlayerId = "bot";
+export const BOT_NAME = "ChaosBot";
 
 /**
  * A trivial combat bot — the M1 stand-in for a second player. It produces an

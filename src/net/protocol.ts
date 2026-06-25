@@ -69,4 +69,12 @@ export interface SnapshotMsg {
   snap: Snapshot;
 }
 
-export type ServerMsg = WelcomeMsg | SnapshotMsg;
+/** Server's refusal of a `hello` — e.g. the arena is at its player cap (M2.7).
+ *  Sent in place of `welcome`; the server then closes the socket. The client
+ *  shows `reason` and stops, rather than hanging forever in "connecting…". */
+export interface RejectMsg {
+  type: "reject";
+  reason: string;
+}
+
+export type ServerMsg = WelcomeMsg | SnapshotMsg | RejectMsg;

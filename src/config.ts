@@ -177,7 +177,7 @@ export const NET = {
    *  Failure mode it guards: too small and a single late/jittered snapshot leaves
    *  the buffer empty at render time, forcing extrapolation (below). Tuned against
    *  the network simulator to sit ~one jitter-spike above the 50ms broadcast gap. */
-  interpDelayMs: 100,
+  interpDelayMs: 75,
 
   /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
    *  leaves no sample newer than render time), remote entities are dead-reckoned

@@ -42,6 +42,12 @@ export interface Snapshot {
    *  only inspects it (debug overlay) for now, it corrects nothing yet. */
   lastProcessedInputSeq: number;
   inputBufferDepth: number;
+  /** M2.7 — server-measured round-trip time (ms) for every player, keyed by id.
+   *  Net metadata, not sim state, so it rides on the snapshot alongside the ack
+   *  fields rather than polluting the pure `Player` entity. The client shows it
+   *  on debug-quality nametags. A player with no measurement yet (e.g. the bot,
+   *  or a just-joined socket before its first pong) is simply absent. */
+  pings: Record<PlayerId, number>;
 }
 
 /**
@@ -51,8 +57,16 @@ export interface Snapshot {
  *
  * `ack` is the recipient's input-processing state (M2.3); it's per-client, like
  * the snapshot itself, so it's passed in rather than read from the shared world.
+ * `pings` is the server's RTT-by-player map (M2.7) — global, not per-recipient,
+ * so the same object is fine for every client; defaults to empty for transports
+ * with no measurement (the in-process loopback).
  */
-export function serializeSnapshotFor(world: World, _playerId: PlayerId, ack: InputAck): Snapshot {
+export function serializeSnapshotFor(
+  world: World,
+  _playerId: PlayerId,
+  ack: InputAck,
+  pings: Record<PlayerId, number> = {},
+): Snapshot {
   return structuredClone({
     tick: world.tick,
     players: [...world.players.values()],
@@ -60,6 +74,7 @@ export function serializeSnapshotFor(world: World, _playerId: PlayerId, ack: Inp
     events: world.events,
     lastProcessedInputSeq: ack.lastProcessedInputSeq,
     inputBufferDepth: ack.inputBufferDepth,
+    pings,
   });
 }
 

@@ -48,7 +48,7 @@ function snap(
   projectiles: Projectile[] = [],
   events: GameEvent[] = [],
 ): Snapshot {
-  return { tick, players, projectiles, events, lastProcessedInputSeq: 0, inputBufferDepth: 0 };
+  return { tick, players, projectiles, events, lastProcessedInputSeq: 0, inputBufferDepth: 0, pings: {} };
 }
 
 const LOCAL = "me";

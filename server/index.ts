@@ -24,15 +24,29 @@ import { World } from "../src/sim/world";
 import { FixedLoop } from "../src/sim/loop";
 import { serializeSnapshotFor } from "../src/net/snapshot";
 import { ServerInputBuffer } from "../src/net/serverInput";
-import { computeBotInput } from "../src/sim/bot";
+import { BOT_ID, BOT_NAME, computeBotInput } from "../src/sim/bot";
 import type { InputCommand, PlayerId, StepContext } from "../src/sim/types";
 import type { ClientMsg, ServerMsg } from "../src/net/protocol";
 import { loadMapSync } from "./loadMap";
 
 const PORT = 3000;
 /** Broadcast a snapshot every N sim ticks: 100 / 5 = 20 Hz. */
-const BROADCAST_EVERY = 5;
-const BOT_ID: PlayerId = "bot";
+const BROADCAST_EVERY = 3;
+/** Measure each socket's round-trip time this often (ms) via WS ping/pong. */
+const PING_EVERY_MS = 1000;
+
+// ---------- sanity caps (M2.7) ------------------------------------------------
+// Minimal abuse guards — not anti-cheat. They bound resource use so one bad or
+// hostile client can't exhaust the server or bloat snapshots.
+
+/** Max simultaneous human players. Bounds snapshot size and the sim's per-tick
+ *  cost; a `hello` past this is rejected and the socket closed. */
+const MAX_PLAYERS = 16;
+/** Max client→server messages per socket per second. At 100Hz the legit input
+ *  stream is ~100 msg/s; this leaves generous headroom while capping a flood.
+ *  Messages over the limit in a given second are dropped, not disconnected, so a
+ *  brief burst (e.g. catch-up after a stall) is tolerated. */
+const MAX_MSGS_PER_SEC = 300;
 
 // ---------- world setup -------------------------------------------------------
 
@@ -42,8 +56,10 @@ const world = new World(map, 1, false);
 const loop = new FixedLoop(world);
 
 // Seed the server with one bot so a solo player has someone to fight.
-// The bot is just another player whose InputCommands come from the AI, not a socket.
-world.addPlayer(BOT_ID, "ChaosBot", 1, WARBIRD);
+// The bot is just another player whose InputCommands come from the AI, not a
+// socket — it lives fully server-side (M2.7). Its id/name are shared from
+// sim/bot.ts so the buildCtx wiring below can route its input to the AI.
+world.addPlayer(BOT_ID, BOT_NAME, 1, WARBIRD);
 
 // Per-player sequenced input queues (M2.3). Consumed one command per tick in
 // the step provider below; acked back to each client in its snapshot.
@@ -55,20 +71,42 @@ interface Session {
   ws: WebSocket;
   playerId: PlayerId;
   name: string;
+  /** Last measured round-trip time (ms), from WS ping/pong. 0 until the first
+   *  pong returns. Mirrored into `pings` for the snapshot. */
+  rttMs: number;
+  /** `performance.now()` of the outstanding ping, or 0 if none is in flight. */
+  pingSentAt: number;
+  /** Messages received from this socket in the current rate-limit window. */
+  msgsThisSec: number;
 }
 const sessions: Session[] = [];
 let nextId = 1;
+
+/** RTT (ms) by player id, rebuilt from the live sessions each broadcast and sent
+ *  in every snapshot so clients can show ping on nametags (M2.7). The bot has no
+ *  socket, so it's simply absent. */
+function pingMap(): Record<PlayerId, number> {
+  const pings: Record<PlayerId, number> = {};
+  for (const s of sessions) pings[s.playerId] = s.rttMs;
+  return pings;
+}
 
 function send(ws: WebSocket, msg: ServerMsg): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
 function broadcast(): void {
+  const pings = pingMap();
   for (const s of sessions) {
-    const snap = serializeSnapshotFor(world, s.playerId, {
-      lastProcessedInputSeq: inputs.ack(s.playerId),
-      inputBufferDepth: inputs.depth(s.playerId),
-    });
+    const snap = serializeSnapshotFor(
+      world,
+      s.playerId,
+      {
+        lastProcessedInputSeq: inputs.ack(s.playerId),
+        inputBufferDepth: inputs.depth(s.playerId),
+      },
+      pings,
+    );
     send(s.ws, { type: "snapshot", snap });
   }
 }
@@ -82,17 +120,51 @@ wss.on("connection", (ws) => {
   let session: Session | null = null;
 
   ws.on("message", (raw) => {
-    const msg = JSON.parse((raw as Buffer).toString()) as ClientMsg;
+    // Rate clamp (M2.7): drop messages past the per-second cap rather than let a
+    // flood grow the input buffer or burn CPU. Counter is reset by the 1Hz ping
+    // timer below.
+    if (session) {
+      if (session.msgsThisSec >= MAX_MSGS_PER_SEC) return;
+      session.msgsThisSec++;
+    }
+
+    let msg: ClientMsg;
+    try {
+      msg = JSON.parse((raw as Buffer).toString()) as ClientMsg;
+    } catch {
+      return; // ignore malformed frames
+    }
 
     if (msg.type === "hello") {
+      // Ignore a second hello on a live session (the id is assigned once).
+      if (session) return;
+      // Sanity cap (M2.7): refuse joins past the arena's player limit. The bot
+      // isn't a session, so `sessions.length` counts humans only.
+      if (sessions.length >= MAX_PLAYERS) {
+        send(ws, { type: "reject", reason: "Arena full" });
+        ws.close();
+        console.info(`[x] ${msg.name} rejected — arena full (${sessions.length}/${MAX_PLAYERS})`);
+        return;
+      }
       const playerId: PlayerId = `p${nextId++}`;
+      // Server owns spawn assignment — addPlayer runs findSpawn server-side; the
+      // client never picks a position (M2.7).
       world.addPlayer(playerId, msg.name, 0, WARBIRD);
-      session = { ws, playerId, name: msg.name };
+      session = { ws, playerId, name: msg.name, rttMs: 0, pingSentAt: 0, msgsThisSec: 0 };
       sessions.push(session);
       send(ws, { type: "welcome", playerId });
       console.info(`[+] ${msg.name} → ${playerId}  (${sessions.length} connected)`);
     } else if (msg.type === "input" && session) {
       inputs.push(session.playerId, msg.input);
+    }
+  });
+
+  // WS-level pong → round-trip time for this socket (M2.7). The ping is sent by
+  // the 1Hz timer below; the latency is now minus when that ping went out.
+  ws.on("pong", () => {
+    if (session && session.pingSentAt > 0) {
+      session.rttMs = Math.round(performance.now() - session.pingSentAt);
+      session.pingSentAt = 0;
     }
   });
 
@@ -108,6 +180,19 @@ wss.on("connection", (ws) => {
 
   ws.on("error", (err) => console.error("[server] socket error:", err.message));
 });
+
+// ---------- liveness / ping ---------------------------------------------------
+// Once a second: send each socket a WS ping (the pong handler above turns it into
+// an RTT measurement) and reset the per-socket message-rate counter.
+setInterval(() => {
+  for (const s of sessions) {
+    s.msgsThisSec = 0;
+    if (s.ws.readyState === WebSocket.OPEN) {
+      s.pingSentAt = performance.now();
+      s.ws.ping();
+    }
+  }
+}, PING_EVERY_MS);
 
 // ---------- tick loop ---------------------------------------------------------
 

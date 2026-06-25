@@ -23,6 +23,10 @@ export class WebSocketTransport implements Transport {
    *  is valid and the game loop can begin. */
   onConnected: ((playerId: PlayerId) => void) | null = null;
 
+  /** Called if the server refuses the join (e.g. arena full — M2.7). The socket
+   *  is closed by the server right after; the client should surface `reason`. */
+  onRejected: ((reason: string) => void) | null = null;
+
   /** Server-assigned identity for this client. Null until `welcome` arrives. */
   localPlayerId: PlayerId | null = null;
 
@@ -45,6 +49,8 @@ export class WebSocketTransport implements Transport {
         this.onConnected?.(msg.playerId);
       } else if (msg.type === "snapshot") {
         this.snapshotHandler?.(msg.snap);
+      } else if (msg.type === "reject") {
+        this.onRejected?.(msg.reason);
       }
     });
 

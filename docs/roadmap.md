@@ -410,6 +410,73 @@ now build real UI on a proven transport.**
 
 ---
 
+### M2.8 — Deterministic client-side simulation of remote projectiles
+
+**Goal:** kill the two remaining "it's-being-inferred" artifacts on *other
+players'* shots — bullets that **jump/teleport when they bounce off a wall**, and
+enemy fire that visibly trails by the interpolation delay — by simulating remote
+projectiles **locally and deterministically** instead of interpolating their
+streamed positions. This is what the original Subspace did (every client ran every
+bullet's physics locally from a fire event); it is **not** server-side hit rewind,
+which is a different feature for hit *fairness* (Phase 2).
+
+**Why this is the right fix (and rewind is not):** a projectile's entire future is
+fixed at spawn — `stepProjectile` (`sim/systems/projectiles.ts`) advances it from
+*only* position, velocity, bounce count, and the map; **no player input drives
+it**. So any client with the spawn parameters can reproduce its path bit-for-bit,
+bounces included (the sim is pure/deterministic — the same property M2.4/M2.6
+already exploit for the local player and its own shots). Today remote bullets are
+instead **lerped** between snapshot positions (`net/interpolation.ts`, the
+`view.projectiles` block), so a bounce that happens between two snapshots is drawn
+as a straight line through the corner until the post-bounce snapshot arrives —
+the "jump." Your **own** shots are already locally simulated (M2.6); this extends
+that to everyone's.
+
+**Unlocks:** Subspace-grade weapon feel under latency; the local-projectile-sim
+seam that M5 items (repel/burst/mines altering trajectories) will reconcile
+against.
+
+**Scope:**
+- [ ] `net/remoteProjectiles.ts`: a `RemoteProjectileSimulator` holding a tiny
+      never-networked `World` (map only). Each frame: clone the latest
+      authoritative remote projectiles and step `projectileSystem` forward by the
+      elapsed ticks to the chosen render time (mirrors the predictor's
+      rebuild-and-replay; input-free so no ring buffer needed).
+- [ ] Route remote projectiles through it: make `interpolation.ts` **skip all
+      projectiles** (not just the local player's — [interpolation.ts:136]), and in
+      `main.ts` push `remoteProjectiles.simulate(...)` into `view.projectiles`
+      alongside the predictor's own shots.
+- [ ] **Render-time decision (resolve first, it sets the scope):** render remote
+      bullets at the **same render time as remote ships** (`now − interpDelayMs`),
+      *not* present. This fixes the bounce-jump without detaching bullets from the
+      ships that fired them. Rendering them at true present requires also
+      extrapolating remote *ships* to present, which reintroduces the
+      turn→overshoot→snap the roadmap rejected in M2.2 — explicitly out of scope
+      here. (Document this; it's the crux.)
+- [ ] **Death-during-window reconciliation:** a bullet the server killed (wall/
+      ship/age) between snapshots must retract, not keep flying — cross-check each
+      simulated id against the straddling newer snapshot and drop the ones gone.
+- [ ] Hits/damage stay **100% server-authoritative** — the local sim is
+      cosmetic-until-confirmed, exactly like predicted own-shots (M2.6). No
+      predicted enemy kills.
+- [ ] Determinism test (mirror `net/determinism.test.ts`): a remote bullet
+      simulated locally through a wall bounce matches the server's snapshot path
+      to ~0px; an item-perturbed or server-killed bullet reconciles without a pop.
+
+**Out of scope:** server-side lag compensation / hit rewind (Phase 2 — fixes hit
+*fairness*, not visuals); extrapolating remote *ships* to present; predicting
+item effects on trajectories (M5 reconciles those against this seam).
+
+**Playable end state:** enemy bullets bounce cleanly off walls in real time with
+no teleport, and weapon fire reads as instant/contiguous like the original — while
+remote ships stay smoothly interpolated and all damage stays authoritative. **The
+last "inferred-looking" weapon artifact is gone.**
+
+**Refs:** architecture §5.2; this milestone is the projectile counterpart to the
+ship prediction in M2.4 and own-weapon prediction in M2.6.
+
+---
+
 ## M3 — Client surfaces / UI foundation
 
 **Goal:** build the bitmap-font UI toolkit and the lobby's core surfaces so it

@@ -33,7 +33,7 @@ export class NametagLayer {
   readonly container = new Container();
   private tags: Tag[] = [];
 
-  update(world: World, alpha: number): void {
+  update(world: World, alpha: number, pings: Record<string, number> = {}): void {
     const players: Player[] = [...world.players.values()];
     while (this.tags.length < players.length) this.tags.push(this.makeTag());
 
@@ -45,7 +45,12 @@ export class NametagLayer {
         continue;
       }
 
-      const label = `${p.name}\n${p.combat.bounty}`;
+      // Name on top; bounty and (debug-quality, M2.7) ping below it. The ping is
+      // server-measured RTT; a player with no measurement yet (the bot, or a
+      // just-joined socket) has no entry, so we omit it rather than show "0ms".
+      const ping = pings[p.id];
+      const detail = ping !== undefined ? `${p.combat.bounty}  ${ping}ms` : `${p.combat.bounty}`;
+      const label = `${p.name}\n${detail}`;
       if (label !== tag.lastLabel) {
         tag.text.text = label;
         tag.lastLabel = label;

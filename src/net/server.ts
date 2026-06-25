@@ -13,17 +13,13 @@
 
 import { WARBIRD } from "../config";
 import { FixedLoop } from "../sim/loop";
-import { computeBotInput } from "../sim/bot";
+import { BOT_ID, BOT_NAME, computeBotInput } from "../sim/bot";
 import type { PlayerId, StepContext, InputCommand } from "../sim/types";
 import { LOCAL_PLAYER_ID, World } from "../sim/world";
 import type { GameMap } from "../sim/gamemap";
 import type { SequencedInput } from "./protocol";
 import { ServerInputBuffer } from "./serverInput";
 import { serializeSnapshotFor, type Snapshot } from "./snapshot";
-
-/** The M1 bot — stays a second player driven by AI until M2.7 moves it here
- *  fully server-side. Defined here so server and client share the same id. */
-export const BOT_PLAYER_ID: PlayerId = "bot";
 
 /**
  * The interface the server uses to deliver snapshots to clients.
@@ -49,7 +45,7 @@ export class GameServer {
   constructor(map: GameMap) {
     // World auto-adds the LOCAL_PLAYER_ID; we also add the combat bot.
     this.world = new World(map);
-    this.world.addPlayer(BOT_PLAYER_ID, "Roaming Bot", 1, WARBIRD);
+    this.world.addPlayer(BOT_ID, BOT_NAME, 1, WARBIRD);
     this.loop = new FixedLoop(this.world);
   }
 
@@ -75,7 +71,7 @@ export class GameServer {
   private buildCtx(): StepContext {
     const map = new Map<PlayerId, InputCommand>();
     for (const id of this.world.players.keys()) {
-      map.set(id, id === BOT_PLAYER_ID ? computeBotInput(this.world, id) : this.inputs.next(id));
+      map.set(id, id === BOT_ID ? computeBotInput(this.world, id) : this.inputs.next(id));
     }
     return { inputs: map };
   }
