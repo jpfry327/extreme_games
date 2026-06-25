@@ -215,3 +215,26 @@ export const NET = {
     lossPct: 3,
   },
 } as const;
+
+// --- Server-side lag compensation (M2.9) -------------------------------------
+// "What you see is what you hit." The server adjudicates each projectile hit
+// against where its targets were in the *firer's* view at the moment the shot
+// was sampled — not the server's present — so a shot that visually connects on
+// your screen registers despite the interpolation delay (~interpDelayMs) and the
+// wire. The amount of rewind rides in each input (`InputCommand.renderTick`) and
+// is stamped onto the spawned projectile (`Projectile.compTicks`), so the server
+// stays a pure function of its inputs — the determinism contract still holds.
+export const LAGCOMP = {
+  /** Length of the server's per-tick pose-history ring (ticks). Must comfortably
+   *  exceed the largest rewind we ever apply — interpDelay (~7.5t @75ms) + max
+   *  RTT/2 + jitter — so a lookup `compTicks` ago is still in range. 120t = 1.2s
+   *  @100Hz, matching the roadmap's sizing. Runtime-only; never serialized. */
+  historyTicks: 120,
+
+  /** Hard cap on a single projectile's `compTicks` (ticks). The dial on the
+   *  favour-the-shooter trade: it bounds how far back a target can be rewound, so
+   *  a very laggy — or spoofed — client can't reach arbitrarily far into the past.
+   *  25t = 250ms, the top of the roadmap's 150–250ms band. Also implicitly capped
+   *  by `historyTicks - 1` (you can't rewind past what's recorded). */
+  maxCompTicks: 25,
+} as const;

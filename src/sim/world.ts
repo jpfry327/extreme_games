@@ -1,5 +1,6 @@
-import { WARBIRD, type ShipType } from "../config";
+import { LAGCOMP, WARBIRD, type ShipType } from "../config";
 import { GameMap } from "./gamemap";
+import { TickHistory } from "./history";
 import { createPlayer } from "./player";
 import { SeededRng } from "./rng";
 import { findSpawn } from "./spawn";
@@ -48,6 +49,14 @@ export class World {
   /** Events produced this tick (Layer C). Appended to during step(); the client
    *  drains and clears this once per drawn frame (see main.ts). */
   events: GameEvent[] = [];
+
+  /** Per-tick pose history for server-side lag compensation (M2.9). Runtime-only,
+   *  like `events`/`contacts` — never serialized into a snapshot. Populated at the
+   *  end of each `step()` and read by the collision system to rewind a target to
+   *  the firer's view. Only the authoritative server meaningfully accrues this; on
+   *  the client the view world is never stepped and the predicted world holds no
+   *  remote targets, so its history is harmless and unread. */
+  history = new TickHistory(LAGCOMP.historyTicks);
 
   /** Which player this client controls / the camera follows. Server-side this
    *  has no meaning; it's a client convenience that rides along on the world.
@@ -111,5 +120,10 @@ export class World {
     damageSystem(this);
     deathSystem(this);
     respawnSystem(this);
+
+    // Record this tick's end-of-step poses for lag compensation (M2.9). Written
+    // last so the next tick's collision tests can rewind to any of the last
+    // ~historyTicks. Runtime-only; not part of the snapshot.
+    this.history.record(this.tick, this.players);
   }
 }

@@ -77,28 +77,37 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 
 ## Current milestone status
 
-Per `docs/roadmap.md`, M2.5 (correction smoothing & network-condition hardening) is complete. The sequence is:
+Per `docs/roadmap.md`, M2.9 (server-side lag compensation) is complete — the full
+standard netcode model is now in place. The sequence is:
 ```
-M0 ✓ → M1 ✓ → M2.0 ✓ → M2.1 ✓ → M2.2 ✓ → M2.3 ✓ → M2.4 ✓ → M2.5 ✓ → M2.6 (projectile/weapon prediction) → ...
+M0 ✓ → M1 ✓ → M2.0 ✓ → M2.1 ✓ → M2.2 ✓ → M2.3 ✓ → M2.4 ✓ → M2.5 ✓ → M2.6 ✓ → M2.7 ✓ → M2.8 ✓ → M2.9 ✓ → M3 (UI) → ...
 ```
 
-M2.5 added four things on top of M2.4's rewind-and-replay:
-- **`net/networkSimulator.ts`** (`SimulatedTransport`): wraps any `Transport` and injects added
-  latency, jitter, and packet loss in both directions. Toggled and tuned live from the `#netsim`
-  DOM panel (top-right, below the netcode overlay). Off by default; the handshake is on the inner
-  transport so joins never block under simulated loss.
-- **`net/reconciliationSmoother.ts`** (`ReconciliationSmoother`): absorbs the pose discontinuity
-  produced by each reconciliation into a decaying render-offset, so corrections ease in rather than
-  snap. Zero offset in steady state → no added latency; blips only on a real misprediction.
-- **Bounded extrapolation** in `net/interpolation.ts`: when the snapshot buffer starves (lag spike
-  / dropped packets), remote entities dead-reckon from their last velocity for up to
-  `NET.extrapolateMaxMs` (100ms) then freeze, rather than hard-holding the stale pose.
-- **`net/determinism.test.ts`**: two independent `World`s driven through the same input stream stay
-  byte-identical every tick (via `serializeSnapshotFor`); rewind-and-replay reproduces a
-  continuously-stepped world exactly. Guards the prediction contract the whole milestone rests on.
+The three legs of the model: **client prediction** (own ship/shots at present — M2.4/M2.6),
+**entity interpolation** (remotes smoothed in the past — M2.2/M2.8), and **lag compensation**
+(server rewinds targets to the firer's view — M2.9).
 
-The netcode debug overlay was updated to M2.5 and shows `smooth off Npx` (decaying correction
-offset) and `netsim Xms ±Yms Z% loss` or `netsim off`.
+M2.9 makes a shot that *visually connects* on the firer's screen actually register, fixing
+"eaten bombs" (a remote ship is drawn ~`interpDelayMs` in the past, but collision tested the
+present, so shots sailed through the drawn ghost). The pieces:
+- **`sim/history.ts`** (`TickHistory`): a runtime-only `world.history` ring (`LAGCOMP.historyTicks`
+  = 120t) of each player's `{x, y, radius, alive}`, recorded at the end of every `World.step()`.
+  Never serialized — only the authoritative server accrues it.
+- **`InputCommand.renderTick`**: the server tick the client's render view corresponded to when it
+  sampled the command (`SnapshotInterpolator.renderTick()`, stamped in `main.ts`). The rewind rides
+  *in the input*, so the server stays a pure function of its inputs — determinism holds.
+- **`Projectile.compTicks`**: `firingSystem` stamps `spawnTick − renderTick` (clamped to
+  `LAGCOMP.maxCompTicks` = 25t = 250ms and the history length) onto each shot; it carries for the
+  shot's whole life so every flight-tick `collisionSystem` overlap test reaches `compTicks` into the
+  past. The shot still *flies* in the present; only the *overlap test* rewinds.
+- **Scope:** both projectile *direct-hit* detection (`collisionSystem`) and bomb *splash*
+  (`detonateBomb`) are lag-compensated to the shot's `compTicks` — the splash had to be, since a
+  Subspace bomb does all its damage via splash and a present-based blast on the ghost does ~zero
+  damage to a mover. Hits/damage stay 100% server-authoritative — no predicted kills, no rollback of
+  consequences. `ShipHitEvent.rewound` flags rewind hits.
+
+The netcode debug overlay is at M2.9 and adds `lagcomp Nt (~Nms)  rewind hits N` alongside the
+M2.5 `smooth off Npx` / `netsim …` lines.
 
 ## Key constraints
 

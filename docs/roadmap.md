@@ -531,44 +531,58 @@ in the present (so it looks right to the firer who predicted it); only the
 *overlap test* reaches into the past.
 
 **Scope:**
-- [ ] **World pose history (server runtime).** Add a `world.history` ring — a
+- [x] **World pose history (server runtime).** Add a `world.history` ring — a
       runtime-only field like `events`/`contacts`, **not** serialized into
       snapshots — holding the last ~120 ticks (~1.2s) of each player's
       `{x, y, radius, alive}`. Populate it each `step()`. Sized to cover
       `interpDelay + max RTT/2 + jitter` with margin. (The client never accrues it:
       its view world isn't stepped and its predicted world has no remote targets.)
-- [ ] **Carry the firer's render-time in the input (keeps determinism).** Extend
+      *(`sim/history.ts` `TickHistory`; recorded at the end of `World.step()`,
+      sized by `LAGCOMP.historyTicks`.)*
+- [x] **Carry the firer's render-time in the input (keeps determinism).** Extend
       `InputCommand`/`SequencedInput` (M2.3) with the **server tick the client's
       render view corresponded to** when it sampled that input — the client knows
       this exactly: the straddling snapshot ticks and blend `t` it interpolated
       through (`pickStraddlingPair`). Because the rewind amount now rides in the
-      input, the server stays a pure function of its inputs.
-- [ ] **Stamp `compTicks` onto spawned projectiles.** In `firingSystem`, when an
+      input, the server stays a pure function of its inputs. *(`InputCommand.renderTick`;
+      computed by `SnapshotInterpolator.renderTick()` and stamped in `main.ts`.
+      It rides on `InputCommand` — not just `SequencedInput` — because that is the
+      shape `firingSystem` reads and the determinism test streams.)*
+- [x] **Stamp `compTicks` onto spawned projectiles.** In `firingSystem`, when an
       input spawns a shot, set `projectile.compTicks = spawnTick − input.renderTick`
       (clamped ≥ 0 and to the history length). Pure data on the projectile; absent /
       0 means "no compensation" (e.g. the bot, or a client that didn't report).
-- [ ] **Lag-compensated overlap in `collisionSystem`.** When testing a projectile
+      *(`firingSystem` `compTicksFor`.)*
+- [x] **Lag-compensated overlap in `collisionSystem`.** When testing a projectile
       with `compTicks > 0` against a target, compare against that target's pose at
       `world.tick − compTicks` looked up from `world.history` (fall back to present
       if out of range). Everything else — bullet→`Contact`, bomb dies-on-contact —
-      is unchanged. Deterministic given the same history + projectiles.
-- [ ] **Decide the bomb *splash* timeline.** The direct-hit detection is
-      lag-compensated (that's the eaten-bomb fix); keep the area blast
-      (`detonateBomb`) evaluated against **present** positions for a first cut
-      (area effect is forgiving), and document the choice. Revisit only if splash
-      feels off.
-- [ ] **Bound the compensation.** Cap `compTicks` at a config max (~150–250ms) so a
+      is unchanged. Deterministic given the same history + projectiles. *(A target
+      that wasn't `alive` in the rewound view also can't be hit.)*
+- [x] **Decide the bomb *splash* timeline.** Initially shipped present-based per
+      the "area effect is forgiving" first cut — but that was **wrong** and felt
+      eaten: a Subspace bomb deals *all* its damage via splash, and over a rewind
+      window a moving ship is displaced far more than the ~18px blast radius, so a
+      present-based blast detonating on the ghost did ~zero damage to exactly the
+      movers lag comp exists to hit. **Now lag-compensated** (`detonateBomb` rewinds
+      the blast test to the bomb's `compTicks`, for parity with the direct-hit
+      detection). Splash hits *can* now be flagged `rewound`. *(`damage.ts`.)*
+- [x] **Bound the compensation.** Cap `compTicks` at a config max (~150–250ms) so a
       very laggy or spoofed client can't rewind targets arbitrarily far. The cap is
-      the dial on the favour-the-shooter trade.
-- [ ] **Tests.** A unit/determinism test in the sim spirit: a target strafing
+      the dial on the favour-the-shooter trade. *(`LAGCOMP.maxCompTicks` = 25t =
+      250ms, also bounded by `historyTicks − 1`.)*
+- [x] **Tests.** A unit/determinism test in the sim spirit: a target strafing
       laterally, a bomb fired at its *rendered* (delayed) position — **hit** with
       compensation on, **miss** with it off; two worlds driven by the same inputs
       (now including `renderTick`) stay byte-identical (extend
       `determinism.test.ts`). A server test that `world.history` lookups are bounded
-      and never read un-stepped ticks.
-- [ ] **Debug HUD / overlay.** Surface per-shot `compTicks` (or the firer's
+      and never read un-stepped ticks. *(`sim/lagcomp.test.ts` — hit/miss via the
+      real `collisionSystem`, `compTicks` stamping + clamp, `TickHistory` bounds;
+      `determinism.test.ts` — renderTick-bearing stream stays byte-identical.)*
+- [x] **Debug HUD / overlay.** Surface per-shot `compTicks` (or the firer's
       effective rewind ms) so the compensation is observable, and an indicator when
-      a hit was awarded via rewind vs present.
+      a hit was awarded via rewind vs present. *(Overlay line `lagcomp Nt (~Nms)
+      rewind hits N`; `ShipHitEvent.rewound` flags rewind hits.)*
 
 **Out of scope:** **client-authoritative weapons** (the original Subspace model —
 hit detection on the victim's machine; lower latency on offence but cheatable and

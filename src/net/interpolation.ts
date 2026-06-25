@@ -139,6 +139,27 @@ export class SnapshotInterpolator {
   }
 
   /**
+   * The server tick the local view corresponds to at render time `nowMs −
+   * interpDelayMs` — the rewind target for server-side lag compensation (M2.9).
+   * The firer is always looking at remote ships interpolated between the
+   * straddling snapshot pair, so the tick it's effectively aiming through is those
+   * two snapshots' ticks blended by the same `t` the poses use, rounded to a whole
+   * tick (the server's history is keyed by integer ticks). Stamped onto each
+   * outgoing input so the server can rewind targets to exactly this view.
+   *
+   * Returns `null` before any snapshot has arrived (no view yet → no
+   * compensation). During buffer starvation the pair clamps to the newest sample,
+   * so this returns the newest tick — i.e. less rewind, never more.
+   */
+  renderTick(nowMs: number, interpDelayMs: number, extrapolateMaxMs: number): number | null {
+    const renderTime = nowMs - interpDelayMs;
+    const pair = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs);
+    if (!pair) return null;
+    const { a, b, t } = pair;
+    return Math.round(a.snap.tick + (b.snap.tick - a.snap.tick) * t);
+  }
+
+  /**
    * Populate `view` with the interpolated world for render time `nowMs −
    * interpDelayMs`. Remote *players* are lerped between the straddling snapshot
    * pair; the local player is pinned to the newest snapshot. Projectiles are left

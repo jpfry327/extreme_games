@@ -1,4 +1,4 @@
-import { NET, TICK_HZ } from "./config";
+import { NET, TICK_DT, TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
@@ -61,6 +61,8 @@ async function main() {
   // have something newer — so it's dropped to keep the buffer monotonic and stop
   // the predictor from rewinding to an old authoritative pose.
   let newestSnapTick = -1;
+  // M2.9 debug counter: total hits the server awarded via lag-comp rewind.
+  let rewindHitCount = 0;
 
   // 3. Input + renderer — initialize NOW so the canvas is on screen while we
   //    connect. The game loop starts immediately in "connecting…" mode.
@@ -179,8 +181,15 @@ async function main() {
     }
 
     // Produce one stamped command per elapsed sim tick (not per render frame)
-    // and send every one, so the server gets a continuous, ordered stream.
-    for (const input of inputMgr.produce(dt, keyboard.sample(), now)) {
+    // and send every one, so the server gets a continuous, ordered stream. M2.9:
+    // stamp the command with the server tick our render view corresponds to (the
+    // ghost positions we're aiming at), so the server rewinds targets to exactly
+    // this view when adjudicating our shots ("what you see is what you hit"). All
+    // catch-up ticks this frame share it, like they share the keyboard sample.
+    const renderTick = interp.renderTick(now, NET.interpDelayMs, NET.extrapolateMaxMs);
+    const sample = keyboard.sample();
+    const stamped = renderTick !== null ? { ...sample, renderTick } : sample;
+    for (const input of inputMgr.produce(dt, stamped, now)) {
       transport.sendInput(input);
     }
 
@@ -228,6 +237,9 @@ async function main() {
     for (const e of view.events) {
       if (e.type === "shipDied")
         feed.add(killLine(view, e.killer, e.victim), now);
+      // M2.9: tally hits the server awarded via lag-comp rewind, so the overlay
+      // can show that "what you see is what you hit" is actually firing.
+      if (e.type === "shipHit" && e.rewound) rewindHitCount++;
     }
     view.events.length = 0;
     feed.render(now);
@@ -266,8 +278,17 @@ async function main() {
     const simLine = sim.enabled
       ? `netsim ${sim.latencyMs}±${sim.jitterMs}ms ${sim.lossPct}% loss`
       : `netsim off`;
+    // M2.9: the rewind our shots carry. When we have predicted shots in flight,
+    // their stamped `compTicks` is the exact server value (the predicted world
+    // ticks at ~server-present); otherwise estimate from the view tick we're
+    // aiming through. Plus a running count of hits the server awarded against a
+    // rewound (past) pose — proof "what you see is what you hit" is firing.
+    const predictedComp = predictor.predictedProjectiles.find((p) => (p.compTicks ?? 0) > 0)?.compTicks;
+    const compTicks =
+      predictedComp ?? (renderTick !== null ? Math.max(0, view.tick - renderTick) : 0);
+    const compMs = compTicks * TICK_DT * 1000;
     netdebug.textContent =
-      `── netcode (M2.8) ──\n` +
+      `── netcode (M2.9) ──\n` +
       `rtt ${inputMgr.rttMs.toFixed(0)}ms (ack)\n` +
       `acked seq ${inputMgr.lastAckedSeq}\n` +
       `client tick ${inputMgr.clientTickCount}\n` +
@@ -278,6 +299,7 @@ async function main() {
       `pred proj ${predictor.predictedProjectiles.length}\n` +
       `remote proj (sim) ${remoteShots.length}\n` +
       `smooth off ${smoother.offsetPx.toFixed(1)}px\n` +
+      `lagcomp ${compTicks}t (~${compMs.toFixed(0)}ms)  rewind hits ${rewindHitCount}\n` +
       simLine;
 
     requestAnimationFrame(frame);
