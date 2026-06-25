@@ -87,6 +87,18 @@ export class Predictor {
    *  (un-acked) ones. main.ts injects these into the render view. M2.6. */
   predictedProjectiles: Projectile[] = [];
 
+  /** Local-owned `bombExploded` events produced during the most recent `predict()`
+   *  replay, tagged with the predicted server tick they detonate on. Rebuilt every
+   *  `predict()` (the same set re-appears each frame until the ack passes them).
+   *  `drainNewExplosions()` turns this into one-shot effects with dedup. M2.10. */
+  private lastExplosions: { tick: number; x: number; y: number }[] = [];
+
+  /** Explosions already surfaced by `drainNewExplosions()`, keyed by tick+pose →
+   *  the tick they detonate on. Dedup across frames (the replay regenerates the
+   *  same explosion every frame); pruned once the ack passes a tick, since the
+   *  replay starts at the ack and can no longer reproduce it. M2.10. */
+  private readonly emittedExplosions = new Map<string, number>();
+
   /** `seq → predicted pose`, recorded during replay so `measureError` can compare
    *  against the authoritative pose for the acked `seq`. Pruned as inputs ack. */
   private readonly predictedPose = new Map<number, PredictedPose>();
@@ -120,6 +132,7 @@ export class Predictor {
   predict(unacked: readonly SequencedInput[], localId: PlayerId): Player | null {
     if (!this.authoritative) {
       this.predictedProjectiles = [];
+      this.lastExplosions = [];
       return null;
     }
 
@@ -137,11 +150,13 @@ export class Predictor {
     this.world.nextProjectileId = 0;
 
     this.predictedPose.clear();
+    const explosions: { tick: number; x: number; y: number }[] = [];
     for (const input of unacked) {
       // Track existing projectiles by identity so we can spot the ones this input
       // spawns (firingSystem pushes new objects; the filter in damageSystem keeps
       // survivors by reference, so survivors stay in the set).
       const before = new Set(this.world.projectiles);
+      const eventsBefore = this.world.events.length;
       this.world.step({ inputs: new Map([[localId, input.cmd]]) });
       for (const p of this.world.projectiles) {
         if (before.has(p)) continue; // already existed — seeded or earlier spawn
@@ -150,12 +165,46 @@ export class Predictor {
         p.spawnSeq = input.seq;
         p.id = predictedProjectileId(input.seq, p.kind);
       }
+      // Capture this step's own-bomb detonations, tagged with the tick they fire
+      // on (the replay accumulates events; we slice off only the new ones). M2.10.
+      for (let i = eventsBefore; i < this.world.events.length; i++) {
+        const e = this.world.events[i];
+        if (e.type === "bombExploded" && e.owner === localId) {
+          explosions.push({ tick: this.world.tick, x: e.x, y: e.y });
+        }
+      }
       const k = this.world.players.get(localId)!.kinematics;
       this.predictedPose.set(input.seq, { x: k.x, y: k.y });
     }
 
     this.predictedProjectiles = this.world.projectiles;
+    this.lastExplosions = explosions;
     return this.world.players.get(localId) ?? null;
+  }
+
+  /**
+   * One-shot local bomb explosions to draw *this frame* — the predicted
+   * detonations not yet surfaced. Call once per render frame (after `predict`):
+   * the replay regenerates the same explosion every frame until the ack passes
+   * its tick, so dedup is essential. Returns each new explosion's position; the
+   * caller draws it immediately and suppresses the delayed server copy (matched
+   * by owner+position in main.ts). M2.10.
+   */
+  drainNewExplosions(): { x: number; y: number }[] {
+    const out: { x: number; y: number }[] = [];
+    for (const e of this.lastExplosions) {
+      const key = `${e.tick}:${Math.round(e.x)}:${Math.round(e.y)}`;
+      if (this.emittedExplosions.has(key)) continue;
+      this.emittedExplosions.set(key, e.tick);
+      out.push({ x: e.x, y: e.y });
+    }
+    // Prune keys the ack has passed: the replay starts at `authoritativeTick`, so
+    // an explosion at-or-before it can never be regenerated — dropping its key is
+    // safe and keeps the map bounded.
+    for (const [key, tick] of this.emittedExplosions) {
+      if (tick <= this.authoritativeTick) this.emittedExplosions.delete(key);
+    }
+    return out;
   }
 
   /**

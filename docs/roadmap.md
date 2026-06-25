@@ -608,6 +608,60 @@ draft (cancelled — it papered over this problem instead of solving it).
 
 ---
 
+### M2.10 — Predicted own-bomb explosion effects
+
+**Goal:** a *local* bomb's detonation **animation** appears the instant the bomb
+reaches the wall on your screen, instead of a round-trip later — the cosmetic
+counterpart to M2.6's instant *firing*. (Damage stays 100% server-authoritative;
+this is the explosion sprite/sound only.)
+
+**The artifact it fixes:** the predicted world (M2.6) already flies, bounces, and
+detonates your own bomb deterministically — `damageSystem` even emits the
+`bombExploded` event — but `predict()` rebuilds every frame and **discarded those
+events**. So the bomb vanished at the wall instantly (predicted) while its
+explosion waited for the server snapshot (`interpDelay` + RTT, ~150–250ms late).
+
+**Mechanism:**
+- `Predictor.drainNewExplosions()` surfaces the local-owned `bombExploded` events
+  produced during the replay, **deduped** (the replay regenerates the same
+  detonation every frame until the ack passes its tick — keyed by tick+pose,
+  pruned at the ack). main.ts injects them into the render view so the renderer
+  draws them *now*.
+- **Double-fire suppression:** `BombExplodedEvent` gains an `owner`. The delayed
+  server copy of an explosion we already drew (matched by owner + position, 1:1
+  consumed) is dropped before the renderer drains events. Detonations prediction
+  *can't* reproduce — a bomb that hit a remote **ship** (no remote ships exist in
+  the predicted world) — don't match a shown boom, so they still draw from the
+  server as before.
+
+**Scope:**
+- [x] `BombExplodedEvent.owner`; set in `damageSystem.detonateBomb`.
+- [x] `Predictor.drainNewExplosions()` (capture during replay + cross-frame dedup).
+- [x] main.ts: inject predicted booms; suppress the matched server twin; debug
+      overlay `pred booms` counter.
+- [x] Reproduction tests confirming **local bullet wall-bounces are *already*
+      predicted** (so that lag is remote bullets on the M2.8 interp timeline, not
+      a bug) + predicted-explosion dedup tests.
+
+**Out of scope:** predicting ship-hit detonations (would need remote ships in the
+predicted world → predicted kills, explicitly rejected); predicting bullet/EMP hit
+sparks; remote-bomb explosion prediction (those are someone else's shots).
+
+**Known limitation:** in tight quarters a bomb that hits a remote ship with a wall
+within ~50px behind it can briefly show a phantom wall detonation in the window
+before the "bomb died" snapshot retracts it. Rare; bounded by the M2.6 seed
+retraction.
+
+**Playable end state:** at ~80ms+ simulated latency your own bombs explode on the
+wall the instant they arrive there, with no second/late explosion — the last
+round-trip-delayed *own*-weapon artifact is gone.
+
+**Refs:** architecture §5.2; the cosmetic counterpart to M2.6 (instant fire) the
+cancelled M2.9 draft was reaching for, now done correctly on top of real
+prediction.
+
+---
+
 ## M3 — Client surfaces / UI foundation
 
 **Goal:** build the bitmap-font UI toolkit and the lobby's core surfaces so it

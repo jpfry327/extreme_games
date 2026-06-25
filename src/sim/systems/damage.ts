@@ -52,7 +52,7 @@ export function damageSystem(world: World): void {
  *  rewind the blast test for parity with the direct-hit detection in the collision
  *  step, so a bomb that visually lands on an enemy actually kills it. */
 function detonateBomb(world: World, bomb: Projectile): void {
-  world.events.push({ type: "bombExploded", x: bomb.x, y: bomb.y });
+  world.events.push({ type: "bombExploded", x: bomb.x, y: bomb.y, owner: bomb.owner });
 
   const radius = COMBAT.bombExplodePixels;
   const full = weaponOf(world, bomb, "bomb");

@@ -212,6 +212,11 @@ export interface BombExplodedEvent {
   type: "bombExploded";
   x: number;
   y: number;
+  /** The player whose bomb this was. Lets the client tell its *own* bomb's
+   *  detonation (which it predicts locally and shows instantly — M2.10) from
+   *  everyone else's (which arrive on the snapshot timeline), so it can suppress
+   *  the delayed server copy of an explosion it already drew. */
+  owner: PlayerId;
 }
 
 /** A ship took damage. Carries enough for a hit flash / sound and a damage
