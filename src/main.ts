@@ -63,6 +63,22 @@ async function main() {
   let newestSnapTick = -1;
   // M2.9 debug counter: total hits the server awarded via lag-comp rewind.
   let rewindHitCount = 0;
+  // M2.10 debug counter: own-bomb explosions drawn from prediction (instant).
+  let predictedBoomCount = 0;
+  // M2.10: local bomb detonations we've already drawn from prediction (instant),
+  // so the delayed server copy of the same explosion can be suppressed instead of
+  // drawn a second time. Each entry expires on its own in case the server copy
+  // never arrives (e.g. the bomb was retracted). A match is consumed (1:1) so two
+  // distinct explosions can't both be cancelled by one prediction.
+  const shownLocalBooms: { x: number; y: number; expiresMs: number }[] = [];
+  // Suppression match radius (px). Predicted and server detonations share the same
+  // deterministic trajectory so land within ~1px; the slack only absorbs float
+  // drift / a small prediction error, and owner+time scoping keeps it from
+  // cancelling a genuinely different explosion.
+  const BOOM_MATCH_PX = 16;
+  // How long a predicted boom waits for its server twin before expiring (ms):
+  // comfortably past interpDelay + a full RTT so the real duplicate is caught.
+  const BOOM_TTL_MS = 600;
 
   // 3. Input + renderer — initialize NOW so the canvas is on screen while we
   //    connect. The game loop starts immediately in "connecting…" mode.
@@ -166,6 +182,34 @@ async function main() {
   let fpsFrames = 0;
   let fps = 0;
 
+  // M2.10: remove from `view.events` the server's delayed copy of any own-bomb
+  // explosion we already drew from prediction, and expire stale predictions. Runs
+  // before the renderer drains events, so a suppressed boom is never spawned.
+  function suppressShownLocalBooms(world: World, nowMs: number): void {
+    // Expire predictions whose server twin never came (e.g. a retracted bomb).
+    for (let i = shownLocalBooms.length - 1; i >= 0; i--) {
+      if (shownLocalBooms[i].expiresMs <= nowMs) shownLocalBooms.splice(i, 1);
+    }
+    // Compact `events` in place, dropping each own-bomb detonation that matches a
+    // shown prediction and consuming that match (so it's strictly 1:1).
+    const events = world.events;
+    let w = 0;
+    for (let r = 0; r < events.length; r++) {
+      const e = events[r];
+      if (e.type === "bombExploded" && e.owner === world.localPlayerId) {
+        const mi = shownLocalBooms.findIndex(
+          (b) => Math.hypot(b.x - e.x, b.y - e.y) <= BOOM_MATCH_PX,
+        );
+        if (mi !== -1) {
+          shownLocalBooms.splice(mi, 1);
+          continue; // suppress: we already drew this one from prediction
+        }
+      }
+      events[w++] = e;
+    }
+    events.length = w;
+  }
+
   function frame(now: number) {
     const dt = (now - last) / 1000;
     last = now;
@@ -203,6 +247,14 @@ async function main() {
     // baked in with prev*===current, so alpha is a no-op here.
     interp.buildView(view, now, NET.interpDelayMs, view.localPlayerId, NET.extrapolateMaxMs);
 
+    // M2.10: drop the delayed server copy of any *own* bomb explosion we already
+    // drew from prediction. Only own-bomb (`owner === localId`) events are
+    // candidates — everyone else's detonations come from the snapshot as usual —
+    // and a match is consumed so it can't cancel a second, distinct explosion.
+    // Ship-hit detonations (which prediction can't reproduce — the predicted world
+    // has no remote ships) won't match a shown boom, so they still draw.
+    suppressShownLocalBooms(view, now);
+
     // M2.4: replace the laggy snapshot-pinned local player with the predicted
     // one (reset to the last ack + replay of un-acked inputs). The camera and
     // local ship now track the predicted pose; remotes stay interpolated. alpha
@@ -216,6 +268,16 @@ async function main() {
       // interpolated snapshot stream (the interpolator skipped them). Appended so
       // they fire instantly and hand off seamlessly to their server twin on ack.
       for (const p of predictor.predictedProjectiles) view.projectiles.push(p);
+      // M2.10: surface this frame's predicted own-bomb detonations (deduped) as
+      // real bombExploded events so the renderer draws them *now*, not a round-trip
+      // later. Record each so its delayed server twin is suppressed above next
+      // frame. The bomb still detonates server-authoritatively for damage — this
+      // is the explosion *animation* only.
+      for (const boom of predictor.drainNewExplosions()) {
+        view.events.push({ type: "bombExploded", x: boom.x, y: boom.y, owner: view.localPlayerId });
+        shownLocalBooms.push({ x: boom.x, y: boom.y, expiresMs: now + BOOM_TTL_MS });
+        predictedBoomCount++;
+      }
     }
 
     // M2.8: everyone else's shots come from the deterministic simulator (forward
@@ -300,6 +362,7 @@ async function main() {
       `remote proj (sim) ${remoteShots.length}\n` +
       `smooth off ${smoother.offsetPx.toFixed(1)}px\n` +
       `lagcomp ${compTicks}t (~${compMs.toFixed(0)}ms)  rewind hits ${rewindHitCount}\n` +
+      `pred booms ${predictedBoomCount}\n` +
       simLine;
 
     requestAnimationFrame(frame);
