@@ -8,6 +8,7 @@ import { Renderer } from "./render/renderer";
 import { WebSocketTransport } from "./net/WebSocketTransport";
 import { SimulatedTransport } from "./net/networkSimulator";
 import { SnapshotInterpolator } from "./net/interpolation";
+import { RemoteProjectileSimulator } from "./net/remoteProjectiles";
 import { ClientInputManager } from "./net/clientInput";
 import { Predictor } from "./net/prediction";
 import { ReconciliationSmoother } from "./net/reconciliationSmoother";
@@ -31,6 +32,12 @@ async function main() {
   //    the past so they glide instead of snapping at the 20Hz broadcast rate.
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
+  // M2.8: remote players' projectiles are simulated deterministically (forward
+  // from the latest snapshot) instead of interpolated, so enemy bullets bounce
+  // off walls in real time instead of teleporting through corners. Rendered at
+  // the same render time as remote ships (now − interpDelay), reading the
+  // interpolator's buffer so the two stay on one timeline.
+  const remoteProjectiles = new RemoteProjectileSimulator(map);
 
   // Input sequencing (M2.3): produces one stamped command per 10ms sim tick and
   // holds the un-acked ring buffer. Snapshots ack by seq; prediction (M2.4) will
@@ -202,6 +209,19 @@ async function main() {
       for (const p of predictor.predictedProjectiles) view.projectiles.push(p);
     }
 
+    // M2.8: everyone else's shots come from the deterministic simulator (forward
+    // from the latest snapshot to the ships' render time) instead of being lerped.
+    // Bounces trace the real path; server-killed bullets retract via b-snapshot
+    // cross-check. Appended alongside the predicted own-shots above.
+    const remoteShots = remoteProjectiles.simulate(
+      interp.snapshots,
+      now,
+      NET.interpDelayMs,
+      view.localPlayerId,
+      NET.extrapolateMaxMs,
+    );
+    for (const p of remoteShots) view.projectiles.push(p);
+
     renderer.draw(view, 1, dt, latestPings);
 
     // Drain events the interpolator released (in interpolated time) this frame.
@@ -247,7 +267,7 @@ async function main() {
       ? `netsim ${sim.latencyMs}±${sim.jitterMs}ms ${sim.lossPct}% loss`
       : `netsim off`;
     netdebug.textContent =
-      `── netcode (M2.5) ──\n` +
+      `── netcode (M2.8) ──\n` +
       `rtt ${inputMgr.rttMs.toFixed(0)}ms (ack)\n` +
       `acked seq ${inputMgr.lastAckedSeq}\n` +
       `client tick ${inputMgr.clientTickCount}\n` +
@@ -256,6 +276,7 @@ async function main() {
       `un-acked (client) ${inputMgr.pendingCount}\n` +
       `pred err ${predictor.predictionErrorPx.toFixed(1)}px\n` +
       `pred proj ${predictor.predictedProjectiles.length}\n` +
+      `remote proj (sim) ${remoteShots.length}\n` +
       `smooth off ${smoother.offsetPx.toFixed(1)}px\n` +
       simLine;
 

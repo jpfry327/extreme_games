@@ -104,7 +104,11 @@ describe("SnapshotInterpolator", () => {
     expect(Math.min(norm, twoPi - norm)).toBeCloseTo(0);
   });
 
-  it("interpolates projectiles by id and shows brand-new ones at their pose", () => {
+  it("no longer interpolates projectiles — leaves them for the simulator (M2.8)", () => {
+    // M2.8 moved all projectile handling out of buildView: own shots come from
+    // the Predictor (M2.6), everyone else's from the RemoteProjectileSimulator
+    // (simulated deterministically so bounces don't teleport). buildView must
+    // leave view.projectiles empty so those two sources start from a clean list.
     const interp = new SnapshotInterpolator();
     interp.push(snap(1, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 0, 0)]), 1000);
     interp.push(
@@ -115,10 +119,7 @@ describe("SnapshotInterpolator", () => {
     const view = viewWorld();
     interp.buildView(view, 1150, 100, LOCAL); // t = 0.5
 
-    const tracked = view.projectiles.find((p) => p.id === 7)!;
-    expect(tracked.x).toBeCloseTo(20); // halfway 0 -> 40
-    const fresh = view.projectiles.find((p) => p.id === 8)!;
-    expect(fresh.x).toBe(99); // only in newer snapshot -> shown at its pose, no smear
+    expect(view.projectiles).toHaveLength(0);
   });
 
   it("drops a player that left in the newer snapshot", () => {

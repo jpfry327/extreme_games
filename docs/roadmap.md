@@ -437,33 +437,37 @@ seam that M5 items (repel/burst/mines altering trajectories) will reconcile
 against.
 
 **Scope:**
-- [ ] `net/remoteProjectiles.ts`: a `RemoteProjectileSimulator` holding a tiny
+- [x] `net/remoteProjectiles.ts`: a `RemoteProjectileSimulator` holding a tiny
       never-networked `World` (map only). Each frame: clone the latest
       authoritative remote projectiles and step `projectileSystem` forward by the
       elapsed ticks to the chosen render time (mirrors the predictor's
       rebuild-and-replay; input-free so no ring buffer needed).
-- [ ] Route remote projectiles through it: make `interpolation.ts` **skip all
-      projectiles** (not just the local player's — [interpolation.ts:136]), and in
-      `main.ts` push `remoteProjectiles.simulate(...)` into `view.projectiles`
-      alongside the predictor's own shots.
-- [ ] **Render-time decision (resolve first, it sets the scope):** render remote
+- [x] Route remote projectiles through it: `interpolation.ts` now **skips all
+      projectiles** (the projectile block is empty), and `main.ts` pushes
+      `remoteProjectiles.simulate(...)` into `view.projectiles` alongside the
+      predictor's own shots. The simulator reads the interpolator's own snapshot
+      buffer (`interp.snapshots`) via a shared `pickStraddlingPair`, so ships and
+      bullets resolve against the exact same render window.
+- [x] **Render-time decision (resolve first, it sets the scope):** render remote
       bullets at the **same render time as remote ships** (`now − interpDelayMs`),
       *not* present. This fixes the bounce-jump without detaching bullets from the
       ships that fired them. Rendering them at true present requires also
       extrapolating remote *ships* to present, which reintroduces the
       turn→overshoot→snap the roadmap rejected in M2.2 — explicitly out of scope
-      here. (Document this; it's the crux.)
-- [ ] **Death-during-window reconciliation:** a bullet the server killed (wall/
+      here. (Documented in `remoteProjectiles.ts`; it's the crux.)
+- [x] **Death-during-window reconciliation:** a bullet the server killed (wall/
       ship/age) between snapshots must retract, not keep flying — cross-check each
       simulated id against the straddling newer snapshot and drop the ones gone.
-- [ ] Hits/damage stay **100% server-authoritative** — the local sim is
+- [x] Hits/damage stay **100% server-authoritative** — the local sim is
       cosmetic-until-confirmed, exactly like predicted own-shots (M2.6). No
-      predicted enemy kills.
-- [ ] Determinism test (mirror `net/determinism.test.ts`): a remote bullet
-      simulated locally through a wall bounce matches the server's snapshot path
-      to ~0px; an item-perturbed or server-killed bullet reconciles without a pop.
+      predicted enemy kills (the simulator runs only `projectileSystem`; it has no
+      players, so no collision/damage path exists).
+- [x] Determinism test (`net/remoteProjectiles.test.ts`, mirroring
+      `net/determinism.test.ts`): a remote bullet simulated locally through a wall
+      bounce matches the server's `projectileSystem` path bit-for-bit; a
+      server-killed bullet retracts via the newer-snapshot cross-check.
 
-**Out of scope:** server-side lag compensation / hit rewind (Phase 2 — fixes hit
+**Out of scope:** server-side lag compensation / hit rewind (**M2.9** — fixes hit
 *fairness*, not visuals); extrapolating remote *ships* to present; predicting
 item effects on trajectories (M5 reconciles those against this seam).
 
@@ -474,6 +478,119 @@ last "inferred-looking" weapon artifact is gone.**
 
 **Refs:** architecture §5.2; this milestone is the projectile counterpart to the
 ship prediction in M2.4 and own-weapon prediction in M2.6.
+
+---
+
+### M2.9 — Server-side lag compensation ("what you see is what you hit")
+
+**Goal:** make a shot that *visually connects* on the firer's screen actually
+register, by having the server adjudicate each hit against where the targets were
+**in the firer's view at the moment they fired** — not against the server's
+present. This is the third and final leg of the standard netcode model:
+
+```
+  client prediction  (own ship / shots at present)   ✓ M2.4 / M2.6
+  entity interpolation (remotes smoothed in the past) ✓ M2.2 / M2.8
+  lag compensation    (server rewinds targets to the firer's view)  ← this
+```
+
+**The artifact it fixes ("eaten bombs"):** remote ships are rendered at
+`now − interpDelayMs` (~75ms) plus up to a 20Hz broadcast gap, so the firer is
+always aiming at a *stale ghost* of a moving ship — yet collision
+([systems/collision.ts]) tests the present, true position. The bomb sails through
+where the enemy *was drawn* but no longer *is*, and the server correctly scores a
+miss. This happens **even at 0 network latency** (it's the interp delay, not the
+wire) and gets worse with real latency — at a 40ms sim it eats ~half of all
+bombs. It is the single biggest felt problem and the reason the M2.9-cosmetic
+draft (below, cancelled) would have made things *worse*: faking the impact effect
+off the rendered overlap would draw a "hit" that reliably does no damage.
+
+**The principle — favour the shooter:** rewinding targets to the firer's view
+means a target who has *already dodged on their own screen* can still be hit
+("I got shot behind cover"). That asymmetry is the accepted, universal lag-comp
+trade: it is far better than the alternative (aim dead-on and miss). We bound the
+rewind so the unfairness stays small.
+
+**Why this fits *our* architecture unusually well:**
+- Layer A is **plain, cloneable data**, so a short ring of past world poses is
+  cheap to keep and read — lag comp here is *"test against a past sample"*, not the
+  classic mutate-rewind-test-restore dance.
+- The sim is **deterministic and input-driven**. To keep it so, the compensation
+  amount must be *input-derived*, not read from a wall clock: the firer's input
+  carries the render-time it was looking at, and the server derives the rewind
+  from that. Two worlds fed the same inputs still step identically — the
+  `determinism.test.ts` contract holds.
+
+**Projectiles, not hitscan — the subtlety to get right:** Subspace weapons
+*travel*; the hit happens many ticks after the shot, by which point the target has
+moved again. So compensation can't be a one-shot test at fire time. Instead the
+**projectile carries the firer's compensation** (`compTicks`) for its whole life,
+and every flight-tick collision test for that projectile is evaluated against each
+candidate target's **historical** pose `compTicks` ago. The projectile still flies
+in the present (so it looks right to the firer who predicted it); only the
+*overlap test* reaches into the past.
+
+**Scope:**
+- [ ] **World pose history (server runtime).** Add a `world.history` ring — a
+      runtime-only field like `events`/`contacts`, **not** serialized into
+      snapshots — holding the last ~120 ticks (~1.2s) of each player's
+      `{x, y, radius, alive}`. Populate it each `step()`. Sized to cover
+      `interpDelay + max RTT/2 + jitter` with margin. (The client never accrues it:
+      its view world isn't stepped and its predicted world has no remote targets.)
+- [ ] **Carry the firer's render-time in the input (keeps determinism).** Extend
+      `InputCommand`/`SequencedInput` (M2.3) with the **server tick the client's
+      render view corresponded to** when it sampled that input — the client knows
+      this exactly: the straddling snapshot ticks and blend `t` it interpolated
+      through (`pickStraddlingPair`). Because the rewind amount now rides in the
+      input, the server stays a pure function of its inputs.
+- [ ] **Stamp `compTicks` onto spawned projectiles.** In `firingSystem`, when an
+      input spawns a shot, set `projectile.compTicks = spawnTick − input.renderTick`
+      (clamped ≥ 0 and to the history length). Pure data on the projectile; absent /
+      0 means "no compensation" (e.g. the bot, or a client that didn't report).
+- [ ] **Lag-compensated overlap in `collisionSystem`.** When testing a projectile
+      with `compTicks > 0` against a target, compare against that target's pose at
+      `world.tick − compTicks` looked up from `world.history` (fall back to present
+      if out of range). Everything else — bullet→`Contact`, bomb dies-on-contact —
+      is unchanged. Deterministic given the same history + projectiles.
+- [ ] **Decide the bomb *splash* timeline.** The direct-hit detection is
+      lag-compensated (that's the eaten-bomb fix); keep the area blast
+      (`detonateBomb`) evaluated against **present** positions for a first cut
+      (area effect is forgiving), and document the choice. Revisit only if splash
+      feels off.
+- [ ] **Bound the compensation.** Cap `compTicks` at a config max (~150–250ms) so a
+      very laggy or spoofed client can't rewind targets arbitrarily far. The cap is
+      the dial on the favour-the-shooter trade.
+- [ ] **Tests.** A unit/determinism test in the sim spirit: a target strafing
+      laterally, a bomb fired at its *rendered* (delayed) position — **hit** with
+      compensation on, **miss** with it off; two worlds driven by the same inputs
+      (now including `renderTick`) stay byte-identical (extend
+      `determinism.test.ts`). A server test that `world.history` lookups are bounded
+      and never read un-stepped ticks.
+- [ ] **Debug HUD / overlay.** Surface per-shot `compTicks` (or the firer's
+      effective rewind ms) so the compensation is observable, and an indicator when
+      a hit was awarded via rewind vs present.
+
+**Out of scope:** **client-authoritative weapons** (the original Subspace model —
+hit detection on the victim's machine; lower latency on offence but cheatable and
+inconsistent — a deliberately *different* design we are not adopting); lag-comping
+**ship↔ship** or movement (only projectile hit detection here); any **rollback of
+consequences** (we still never un-kill or refund — the server simply decides the
+hit once, correctly); reducing `interpDelayMs` or extrapolating remote ships to
+present (rejected in M2.2). The cancelled cosmetic-effects draft's one keeper —
+instant own-bomb **wall/age** explosions — can return later as a small client-only
+polish item once hits feel right; it is explicitly *not* part of this milestone.
+
+**Playable end state:** at 40–150ms (sim or real), a bomb or bullet aimed at where
+an enemy *appears on your screen* lands as a hit, because the server adjudicates it
+against that same view. Bombs stop being "eaten." The favour-the-shooter trade is
+present but bounded. Offence finally feels as responsive as the prediction work
+made your own ship feel — and unlike the original, it's server-authoritative and
+hard to cheat.
+
+**Refs:** architecture §5 (server authority) / §5.2; the Valve/Source "lag
+compensation" model (the third leg alongside the prediction of M2.4/M2.6 and the
+interpolation of M2.2/M2.8). **Supersedes** the earlier M2.9 cosmetic-effects
+draft (cancelled — it papered over this problem instead of solving it).
 
 ---
 

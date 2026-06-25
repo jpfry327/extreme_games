@@ -18,8 +18,13 @@
  * What this step deliberately does NOT do (kept isolated per the M2 sub-split):
  *   - the **local player** is pinned to the latest snapshot, not interpolated
  *     (still laggy; client prediction is M2.4).
- *   - **all** projectiles are interpolated, including the local player's own
- *     (own-weapon prediction is M2.6).
+ *
+ * Projectiles are **not** handled here at all (M2.8): the local player's own
+ * shots come from the `Predictor` (M2.6), and *every other* player's shots are
+ * simulated deterministically by the `RemoteProjectileSimulator` (M2.8) instead
+ * of being lerped — so a bullet that bounces off a wall between two snapshots
+ * traces the real bounce path rather than teleporting through the corner. Both
+ * sources are stitched into `view.projectiles` by main.ts after `buildView`.
  */
 
 import { TICK_DT } from "../config";
@@ -28,10 +33,71 @@ import type { World } from "../sim/world";
 import type { Snapshot } from "./snapshot";
 
 /** A snapshot tagged with the local time it arrived. */
-interface BufferedSnapshot {
+export interface BufferedSnapshot {
   snap: Snapshot;
   /** `performance.now()` ms at receipt — the interpolation timeline. */
   receivedAt: number;
+}
+
+/** The snapshot window straddling a given render time, the result of
+ *  `pickStraddlingPair`. Both the ship interpolator and the projectile simulator
+ *  (M2.8) pick their window through this one function, so remote ships and remote
+ *  bullets are always resolved against the *same* render time — they can never
+ *  disagree about where "now − interpDelay" falls. */
+export interface StraddlePair {
+  /** The older sample (≤ renderTime). At the buffer edges `a === b`. */
+  a: BufferedSnapshot;
+  /** The newer sample (≥ renderTime). */
+  b: BufferedSnapshot;
+  /** Lerp fraction from `a` to `b` (0 at `a`, 1 at `b`). */
+  t: number;
+  /** Dead-reckoning window (ms) past the newest sample — non-zero only when
+   *  render time is beyond the newest snapshot (buffer starvation). 0 while a
+   *  real straddling pair exists. */
+  extrapMs: number;
+}
+
+/**
+ * Pick the buffered snapshot pair straddling `renderTime` (the canonical
+ * Source-engine interpolation window). Returns `null` only for an empty buffer.
+ *
+ *   - Before the oldest sample (buffer warming up): clamp to the oldest, `t=0`.
+ *   - At/after the newest sample (lag spike / dropped run): clamp to the newest
+ *     and report an `extrapMs` window (capped at `extrapolateMaxMs`) so callers
+ *     can dead-reckon forward then freeze, rather than snapping.
+ *   - Otherwise: the two samples `[a, b]` with `a.receivedAt ≤ renderTime ≤
+ *     b.receivedAt`, and `t` the position between them.
+ */
+export function pickStraddlingPair(
+  buffer: readonly BufferedSnapshot[],
+  renderTime: number,
+  extrapolateMaxMs: number,
+): StraddlePair | null {
+  if (buffer.length === 0) return null;
+  const newest = buffer[buffer.length - 1];
+
+  if (renderTime <= buffer[0].receivedAt) {
+    // Before our oldest sample (buffer warming up) — clamp to the oldest pose.
+    return { a: buffer[0], b: buffer[0], t: 0, extrapMs: 0 };
+  }
+  if (renderTime >= newest.receivedAt) {
+    // Caught up to (or past) the newest sample — report a bounded extrapolation
+    // window from it. The roadmap's buffer-starvation fallback.
+    return {
+      a: newest,
+      b: newest,
+      t: 0,
+      extrapMs: Math.min(renderTime - newest.receivedAt, extrapolateMaxMs),
+    };
+  }
+  // Advance until renderTime falls inside [buffer[i], buffer[i+1]].
+  let i = 0;
+  while (i < buffer.length - 1 && buffer[i + 1].receivedAt < renderTime) i++;
+  const a = buffer[i];
+  const b = buffer[i + 1];
+  const span = b.receivedAt - a.receivedAt;
+  const t = span > 0 ? (renderTime - a.receivedAt) / span : 0;
+  return { a, b, t, extrapMs: 0 };
 }
 
 /** How many snapshots to retain. At 20Hz that's ~1.5s of history — far more than
@@ -65,11 +131,19 @@ export class SnapshotInterpolator {
     if (this.buffer.length > MAX_BUFFER) this.buffer.shift();
   }
 
+  /** The buffered snapshots (read-only). The `RemoteProjectileSimulator` (M2.8)
+   *  reads this so it resolves remote bullets against the *exact same* buffer and
+   *  render window the ships are interpolated through — no second timeline. */
+  get snapshots(): readonly BufferedSnapshot[] {
+    return this.buffer;
+  }
+
   /**
    * Populate `view` with the interpolated world for render time `nowMs −
-   * interpDelayMs`. Remote players/projectiles are lerped between the straddling
-   * snapshot pair; the local player is pinned to the newest snapshot. Released
-   * events (in interpolated time) are written to `view.events`.
+   * interpDelayMs`. Remote *players* are lerped between the straddling snapshot
+   * pair; the local player is pinned to the newest snapshot. Projectiles are left
+   * empty here — main.ts fills them from the Predictor + RemoteProjectileSimulator
+   * (M2.8). Released events (in interpolated time) are written to `view.events`.
    *
    * On buffer starvation (render time is past the newest snapshot — a lag spike
    * or a run of dropped snapshots) remote entities are dead-reckoned forward from
@@ -87,31 +161,9 @@ export class SnapshotInterpolator {
     const newest = this.buffer[this.buffer.length - 1];
     const renderTime = nowMs - interpDelayMs;
 
-    // --- pick the straddling snapshot pair a (older) .. b (newer) -------------
-    let a: BufferedSnapshot;
-    let b: BufferedSnapshot;
-    let t: number;
-    // Dead-reckoning window (ms) past the newest snapshot, 0 while interpolating.
-    let extrapMs = 0;
-    if (renderTime <= this.buffer[0].receivedAt) {
-      // Before our oldest sample (buffer warming up) — clamp to the oldest pose.
-      a = b = this.buffer[0];
-      t = 0;
-    } else if (renderTime >= newest.receivedAt) {
-      // Caught up to (or past) the newest sample — extrapolate from it for a
-      // bounded window, then hold. The roadmap's buffer-starvation fallback.
-      a = b = newest;
-      t = 0;
-      extrapMs = Math.min(renderTime - newest.receivedAt, extrapolateMaxMs);
-    } else {
-      // Advance until renderTime falls inside [buffer[i], buffer[i+1]].
-      let i = 0;
-      while (i < this.buffer.length - 1 && this.buffer[i + 1].receivedAt < renderTime) i++;
-      a = this.buffer[i];
-      b = this.buffer[i + 1];
-      const span = b.receivedAt - a.receivedAt;
-      t = span > 0 ? (renderTime - a.receivedAt) / span : 0;
-    }
+    // Pick the straddling snapshot pair a (older) .. b (newer). Shared with the
+    // remote-projectile simulator (M2.8) so ships and bullets agree on the window.
+    const { a, b, t, extrapMs } = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs)!;
 
     view.tick = newest.snap.tick;
 
@@ -131,18 +183,12 @@ export class SnapshotInterpolator {
     if (localNewest) view.players.set(localNewest.id, pinPlayer(localNewest));
 
     // --- projectiles ---------------------------------------------------------
-    const olderProj = new Map(a.snap.projectiles.map((p) => [p.id, p]));
+    // Intentionally empty (M2.8). Projectiles are no longer interpolated here:
+    // main.ts fills `view.projectiles` from the Predictor (own shots, M2.6) and
+    // the RemoteProjectileSimulator (everyone else's, simulated deterministically
+    // so bounces don't teleport). We only clear it so the simulator/predictor
+    // start from an empty list each frame.
     view.projectiles.length = 0;
-    for (const bp of b.snap.projectiles) {
-      // The local player's own shots are rendered from the predictor (M2.6),
-      // pinned to the leading edge — skip them here so they aren't also drawn
-      // ~interpDelay in the past (which would double them and pop at handoff).
-      if (bp.owner === localPlayerId) continue;
-      const ap = olderProj.get(bp.id);
-      const x = (ap ? lerp(ap.x, bp.x, t) : bp.x) + bp.vx * extrapTicks;
-      const y = (ap ? lerp(ap.y, bp.y, t) : bp.y) + bp.vy * extrapTicks;
-      view.projectiles.push({ ...bp, x, y, prevX: x, prevY: y });
-    }
 
     // --- events: release each snapshot's events once, in interpolated time ---
     // The watermark is a strict `>`: two snapshots sharing an identical
