@@ -104,7 +104,13 @@ async function main() {
   //
   //    To swap back to in-process loopback (no server needed), replace these
   //    four lines with the loopback block commented out below.
-  const socket = new WebSocketTransport(`ws://${location.host}/ws`, resolvePlayerName());
+  //
+  //    The server URL is environment-driven: in a production build (GitHub Pages)
+  //    VITE_SERVER_URL is baked in pointing at the deployed Railway server
+  //    (wss://…). With no env var — i.e. local `npm run dev` — it falls back to the
+  //    same-origin `/ws`, which the Vite proxy routes to ws://localhost:3000.
+  const serverUrl = import.meta.env.VITE_SERVER_URL ?? `ws://${location.host}/ws`;
+  const socket = new WebSocketTransport(serverUrl, resolvePlayerName());
 
   // --- loopback alternative (no server needed) ---
   // const server = new GameServer(map);

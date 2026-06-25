@@ -18,6 +18,7 @@
  *   (or `npm run server` after the package.json script is wired up)
  */
 
+import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { WARBIRD, TICK_DT } from "../src/config";
 import { World } from "../src/sim/world";
@@ -29,7 +30,9 @@ import type { InputCommand, PlayerId, StepContext } from "../src/sim/types";
 import type { ClientMsg, ServerMsg } from "../src/net/protocol";
 import { loadMapSync } from "./loadMap";
 
-const PORT = 3000;
+// Railway (and most PaaS hosts) inject the port to bind via process.env.PORT;
+// fall back to 3000 so `npm run server` keeps working locally with no env set.
+const PORT = parseInt(process.env.PORT ?? "3000", 10);
 /** Broadcast a snapshot every N sim ticks: 100 / 5 = 20 Hz. */
 const BROADCAST_EVERY = 3;
 /** Measure each socket's round-trip time this often (ms) via WS ping/pong. */
@@ -113,8 +116,19 @@ function broadcast(): void {
 
 // ---------- WebSocket server --------------------------------------------------
 
-const wss = new WebSocketServer({ port: PORT });
-console.info(`[server] listening on ws://localhost:${PORT}`);
+// Attach the WebSocket server to a plain HTTP server rather than letting `ws`
+// open its own bare socket. The HTTP layer answers Railway's health check on
+// `GET /` with a 200 (a bare WebSocketServer answers nothing on plain HTTP, so
+// the deploy would be marked unhealthy). WebSocket upgrades still ride this same
+// port — Railway terminates TLS at its edge, so browsers connect over `wss://`.
+const httpServer = createServer((_req, res) => {
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end("extreme_games server ok\n");
+});
+const wss = new WebSocketServer({ server: httpServer });
+httpServer.listen(PORT, () => {
+  console.info(`[server] listening on port ${PORT}`);
+});
 
 wss.on("connection", (ws) => {
   let session: Session | null = null;
