@@ -320,19 +320,19 @@ latency, jitter, and loss. Turns "works on localhost" into "works on the
 internet."
 
 **Scope:**
-- [ ] In-transport **network simulator** (toggleable): added latency, jitter, and
+- [x] In-transport **network simulator** (toggleable): added latency, jitter, and
       packet loss in both directions, controllable from the debug HUD — so bad
       conditions are reproducible on demand.
-- [ ] **Smooth** the residual reconciliation error: instead of snapping the local
+- [x] **Smooth** the residual reconciliation error: instead of snapping the local
       ship to the replayed pose, decay the position/rotation error to zero over a
       few frames (a shrinking render-offset), so a correction is felt as a gentle
       pull, never a jump.
-- [ ] Tune `interpDelay` and the snapshot buffer against the simulator; define
+- [x] Tune `interpDelay` and the snapshot buffer against the simulator; define
       graceful behavior on dropped snapshots (extrapolation window + clamp).
-- [ ] **Determinism audit:** an integration test that runs the same input stream
+- [x] **Determinism audit:** an integration test that runs the same input stream
       through two independent `World`s and asserts bit-for-bit equality — guards the
       prediction contract the whole milestone rests on.
-- [ ] Document the failure modes and the constant behind each fix, so a cold
+- [x] Document the failure modes and the constant behind each fix, so a cold
       session understands *why* each number exists.
 
 **Out of scope:** projectile prediction (next), server-side lag

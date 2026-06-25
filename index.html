@@ -56,6 +56,39 @@
         pointer-events: none;
         text-shadow: 0 0 2px #000;
       }
+      /* M2.5 network-simulator controls — below the netdebug readout. */
+      #netsim {
+        position: fixed;
+        top: 168px;
+        right: 8px;
+        color: #6cf;
+        font: 11px/1.6 monospace;
+        text-shadow: 0 0 2px #000;
+        background: rgba(0, 0, 0, 0.4);
+        padding: 6px 8px;
+        border: 1px solid #245;
+        border-radius: 3px;
+      }
+      #netsim label.row {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+      #netsim input[type="range"] {
+        width: 90px;
+        accent-color: #6cf;
+      }
+      #netsim .val {
+        display: inline-block;
+        width: 42px;
+        text-align: right;
+        color: #fd6;
+      }
+      #netsim .title {
+        color: #888;
+        margin-bottom: 2px;
+      }
     </style>
   </head>
   <body>
@@ -63,6 +96,13 @@
     <div id="hud"></div>
     <div id="killfeed"></div>
     <div id="netdebug"></div>
+    <div id="netsim">
+      <div class="title">network sim (M2.5)</div>
+      <label class="row"><span>enabled</span><input type="checkbox" id="ns-enabled" /></label>
+      <label class="row"><span>latency</span><input type="range" id="ns-latency" min="0" max="400" step="10" /><span class="val" id="ns-latency-val"></span></label>
+      <label class="row"><span>jitter</span><input type="range" id="ns-jitter" min="0" max="150" step="5" /><span class="val" id="ns-jitter-val"></span></label>
+      <label class="row"><span>loss</span><input type="range" id="ns-loss" min="0" max="30" step="1" /><span class="val" id="ns-loss-val"></span></label>
+    </div>
     <div id="help">arrows: rotate / thrust &nbsp;•&nbsp; Z (or ctrl): fire &nbsp;•&nbsp; Tab: bomb &nbsp;•&nbsp; shift: afterburner &nbsp;•&nbsp; F: fullscreen</div>
     <script type="module" src="/src/main.ts"></script>
   </body>

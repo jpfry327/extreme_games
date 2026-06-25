@@ -77,21 +77,28 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 
 ## Current milestone status
 
-Per `docs/roadmap.md`, M2.3 (input sequencing, server buffering & acks) is complete. The sequence is:
+Per `docs/roadmap.md`, M2.5 (correction smoothing & network-condition hardening) is complete. The sequence is:
 ```
-M0 ✓ → M1 ✓ → M2.0 ✓ → M2.1 ✓ → M2.2 ✓ → M2.3 ✓ → M2.4 (client prediction + reconciliation) → ...
+M0 ✓ → M1 ✓ → M2.0 ✓ → M2.1 ✓ → M2.2 ✓ → M2.3 ✓ → M2.4 ✓ → M2.5 ✓ → M2.6 (projectile/weapon prediction) → ...
 ```
 
-M2.3 added the **fixed-tick input model**: the client (`net/clientInput.ts`) produces one
-`SequencedInput` per 10ms tick — stamped with a monotonic `seq` — and keeps an un-acked ring
-buffer (the seam M2.4's reconciliation replays). The server (`net/serverInput.ts`) consumes one
-command per tick per player in `seq` order, repeating the last command on a gap rather than idling,
-and stamps each per-client snapshot with `lastProcessedInputSeq` (the ack) + `inputBufferDepth`.
-A netcode debug overlay (`#netdebug`, top-right) surfaces RTT, ack seq, client/server tick, and
-buffer depths — the verification tool for M2.4–M2.6. This is plumbing for M2.4, not a true no-op:
-moving from last-write-wins to one-command-per-tick FIFO means a standing queue backlog now adds
-`depth × 10ms` of input latency (the cost of processing every command in order) that the old model
-discarded. That ordered, gap-free processing is exactly what M2.4 reconciliation requires.
+M2.5 added four things on top of M2.4's rewind-and-replay:
+- **`net/networkSimulator.ts`** (`SimulatedTransport`): wraps any `Transport` and injects added
+  latency, jitter, and packet loss in both directions. Toggled and tuned live from the `#netsim`
+  DOM panel (top-right, below the netcode overlay). Off by default; the handshake is on the inner
+  transport so joins never block under simulated loss.
+- **`net/reconciliationSmoother.ts`** (`ReconciliationSmoother`): absorbs the pose discontinuity
+  produced by each reconciliation into a decaying render-offset, so corrections ease in rather than
+  snap. Zero offset in steady state → no added latency; blips only on a real misprediction.
+- **Bounded extrapolation** in `net/interpolation.ts`: when the snapshot buffer starves (lag spike
+  / dropped packets), remote entities dead-reckon from their last velocity for up to
+  `NET.extrapolateMaxMs` (100ms) then freeze, rather than hard-holding the stale pose.
+- **`net/determinism.test.ts`**: two independent `World`s driven through the same input stream stay
+  byte-identical every tick (via `serializeSnapshotFor`); rewind-and-replay reproduces a
+  continuously-stepped world exactly. Guards the prediction contract the whole milestone rests on.
+
+The netcode debug overlay was updated to M2.5 and shows `smooth off Npx` (decaying correction
+offset) and `netsim Xms ±Yms Z% loss` or `netsim off`.
 
 ## Key constraints
 

@@ -22,6 +22,7 @@
  *     (own-weapon prediction is M2.6).
  */
 
+import { TICK_DT } from "../config";
 import type { Kinematics, Player, PlayerId } from "../sim/types";
 import type { World } from "../sim/world";
 import type { Snapshot } from "./snapshot";
@@ -69,8 +70,18 @@ export class SnapshotInterpolator {
    * interpDelayMs`. Remote players/projectiles are lerped between the straddling
    * snapshot pair; the local player is pinned to the newest snapshot. Released
    * events (in interpolated time) are written to `view.events`.
+   *
+   * On buffer starvation (render time is past the newest snapshot — a lag spike
+   * or a run of dropped snapshots) remote entities are dead-reckoned forward from
+   * their last velocity for up to `extrapolateMaxMs`, then frozen (M2.5).
    */
-  buildView(view: World, nowMs: number, interpDelayMs: number, localPlayerId: PlayerId): void {
+  buildView(
+    view: World,
+    nowMs: number,
+    interpDelayMs: number,
+    localPlayerId: PlayerId,
+    extrapolateMaxMs = 0,
+  ): void {
     if (this.buffer.length === 0) return;
 
     const newest = this.buffer[this.buffer.length - 1];
@@ -80,15 +91,18 @@ export class SnapshotInterpolator {
     let a: BufferedSnapshot;
     let b: BufferedSnapshot;
     let t: number;
+    // Dead-reckoning window (ms) past the newest snapshot, 0 while interpolating.
+    let extrapMs = 0;
     if (renderTime <= this.buffer[0].receivedAt) {
       // Before our oldest sample (buffer warming up) — clamp to the oldest pose.
       a = b = this.buffer[0];
       t = 0;
     } else if (renderTime >= newest.receivedAt) {
-      // We've caught up to (or past) the newest sample — hold it, don't
-      // extrapolate. The roadmap's buffer-starvation fallback.
+      // Caught up to (or past) the newest sample — extrapolate from it for a
+      // bounded window, then hold. The roadmap's buffer-starvation fallback.
       a = b = newest;
       t = 0;
+      extrapMs = Math.min(renderTime - newest.receivedAt, extrapolateMaxMs);
     } else {
       // Advance until renderTime falls inside [buffer[i], buffer[i+1]].
       let i = 0;
@@ -101,15 +115,18 @@ export class SnapshotInterpolator {
 
     view.tick = newest.snap.tick;
 
+    // Convert the dead-reckoning window into sim ticks (velocities are px/tick).
+    const extrapTicks = extrapMs / (1000 * TICK_DT);
+
     // --- players -------------------------------------------------------------
     const olderPlayers = new Map(a.snap.players.map((p) => [p.id, p]));
     view.players.clear();
     for (const bp of b.snap.players) {
       if (bp.id === localPlayerId) continue; // local handled below, from newest
-      view.players.set(bp.id, interpolatePlayer(olderPlayers.get(bp.id), bp, t));
+      view.players.set(bp.id, interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks));
     }
     // The local player is NOT interpolated — render it from the latest
-    // authoritative snapshot (still laggy; prediction lands in M2.4).
+    // authoritative snapshot (prediction overrides it in main.ts since M2.4).
     const localNewest = newest.snap.players.find((p) => p.id === localPlayerId);
     if (localNewest) view.players.set(localNewest.id, pinPlayer(localNewest));
 
@@ -118,8 +135,8 @@ export class SnapshotInterpolator {
     view.projectiles.length = 0;
     for (const bp of b.snap.projectiles) {
       const ap = olderProj.get(bp.id);
-      const x = ap ? lerp(ap.x, bp.x, t) : bp.x;
-      const y = ap ? lerp(ap.y, bp.y, t) : bp.y;
+      const x = (ap ? lerp(ap.x, bp.x, t) : bp.x) + bp.vx * extrapTicks;
+      const y = (ap ? lerp(ap.y, bp.y, t) : bp.y) + bp.vy * extrapTicks;
       view.projectiles.push({ ...bp, x, y, prevX: x, prevY: y });
     }
 
@@ -141,26 +158,34 @@ export class SnapshotInterpolator {
  *  A fresh kinematics object is required — mutating the buffered snapshot's would
  *  corrupt the next frame's interpolation. Other components are read-only in the
  *  renderer/HUD, so they're shared by reference. */
-function interpolatePlayer(older: Player | undefined, newer: Player, t: number): Player {
+function interpolatePlayer(
+  older: Player | undefined,
+  newer: Player,
+  t: number,
+  extrapTicks = 0,
+): Player {
   // Only interpolate from a *live* previous pose. With no older sample (the
   // player just joined) or a dead one (they respawned this interval — their
   // older pose is the death site), lerping would streak the ship across the map
   // from its old position. Pin to the fresh pose instead, so a join/respawn pops
   // in cleanly. (This is what PlayerSpawnedEvent guards against — sim/types.ts.)
-  if (!older || older.combat.respawnAt !== 0) return pinPlayer(newer);
+  if (!older || older.combat.respawnAt !== 0) return pinPlayer(newer, extrapTicks);
 
   const nk = newer.kinematics;
   const ok = older.kinematics;
-  const x = lerp(ok.x, nk.x, t);
-  const y = lerp(ok.y, nk.y, t);
+  const x = lerp(ok.x, nk.x, t) + nk.vx * extrapTicks;
+  const y = lerp(ok.y, nk.y, t) + nk.vy * extrapTicks;
   const rotation = lerpAngle(ok.rotation, nk.rotation, t);
   return { ...newer, kinematics: bakedKinematics(nk, x, y, rotation) };
 }
 
-/** Build a view player pinned to the snapshot pose (no interpolation). */
-function pinPlayer(p: Player): Player {
+/** Build a view player pinned to the snapshot pose, optionally dead-reckoned
+ *  forward by `extrapTicks` of its velocity (buffer-starvation fallback). */
+function pinPlayer(p: Player, extrapTicks = 0): Player {
   const k = p.kinematics;
-  return { ...p, kinematics: bakedKinematics(k, k.x, k.y, k.rotation) };
+  const x = k.x + k.vx * extrapTicks;
+  const y = k.y + k.vy * extrapTicks;
+  return { ...p, kinematics: bakedKinematics(k, x, y, k.rotation) };
 }
 
 /** Kinematics with the given pose and `prev* === current`, so the renderer's

@@ -172,6 +172,46 @@ export const NET = {
   /** How far in the past (ms) remote entities are rendered, so the client always
    *  has two buffered snapshots straddling render time to interpolate between.
    *  ~100ms ≈ two snapshots at the 20Hz broadcast rate. Bigger = smoother under
-   *  jitter but more visible lag on other ships. (roadmap M2.2 / architecture §5.2) */
+   *  jitter but more visible lag on other ships. (roadmap M2.2 / architecture §5.2)
+   *
+   *  Failure mode it guards: too small and a single late/jittered snapshot leaves
+   *  the buffer empty at render time, forcing extrapolation (below). Tuned against
+   *  the network simulator to sit ~one jitter-spike above the 50ms broadcast gap. */
   interpDelayMs: 100,
+
+  /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
+   *  leaves no sample newer than render time), remote entities are dead-reckoned
+   *  forward from their last known velocity for at most this long, then frozen in
+   *  place. Caps how far a wrong guess can drift before the next snapshot snaps it
+   *  back — a small visible glide instead of either a hard freeze or an unbounded
+   *  fly-off. (roadmap M2.5: "extrapolation window + clamp") */
+  extrapolateMaxMs: 100,
+
+  /** Reconciliation correction smoothing (roadmap M2.5). When a snapshot corrects
+   *  the predicted local ship, the residual error is absorbed into a render-offset
+   *  that decays to zero with this half-life rather than snapping. Smaller =
+   *  tighter/snappier correction; larger = floatier but gentler. 80ms ≈ the error
+   *  is ~halved every 5 frames at 60fps, gone within ~a quarter second. */
+  correctionHalfLifeMs: 80,
+
+  /** A correction bigger than this (px) is treated as a teleport — a respawn or a
+   *  genuine divergence — not a misprediction to smooth. Smoothing a map-spanning
+   *  jump would slide the ship visibly across the screen, so beyond this we drop
+   *  the offset and let it snap. ~9 ship-radii. */
+  maxSmoothDistancePx: 128,
+
+  /** Default in-transport network-simulator parameters (roadmap M2.5). Applied
+   *  symmetrically to each direction (client→server inputs and server→client
+   *  snapshots). Off by default; toggled and tuned live from the #netsim debug
+   *  panel so bad conditions are reproducible on demand. These are the *defaults*
+   *  the panel initializes to — the live values live on the SimulatedTransport. */
+  netSim: {
+    enabled: false,
+    /** One-way base added latency, ms, each direction (so ~2× added RTT). */
+    latencyMs: 80,
+    /** Uniform ± jitter, ms, added to each packet's latency (reorders packets). */
+    jitterMs: 30,
+    /** Per-packet drop chance, percent, each direction. */
+    lossPct: 3,
+  },
 } as const;
