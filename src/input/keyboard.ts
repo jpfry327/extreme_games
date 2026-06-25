@@ -40,6 +40,9 @@ export class Keyboard {
         this.held.has("ControlLeft") ||
         this.held.has("ControlRight"),
       bomb: this.held.has("Tab"),
+      // Debug: W warps the bot next to you. Edge-triggered server-side, so it's
+      // fine that this reports `true` for the whole hold (see warpSystem).
+      warp: this.held.has("KeyW"),
     };
   }
 }

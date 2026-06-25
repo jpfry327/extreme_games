@@ -11,6 +11,7 @@ import { firingSystem } from "./systems/firing";
 import { movementSystem } from "./systems/movement";
 import { projectileSystem } from "./systems/projectiles";
 import { respawnSystem } from "./systems/respawn";
+import { warpSystem } from "./systems/warp";
 import type {
   Contact,
   GameEvent,
@@ -57,6 +58,11 @@ export class World {
    *  the client the view world is never stepped and the predicted world holds no
    *  remote targets, so its history is harmless and unread. */
   history = new TickHistory(LAGCOMP.historyTicks);
+
+  /** Which players currently hold the warp key (debug). Runtime-only, like
+   *  `events`/`contacts`/`history` — never serialized. Lets `warpSystem`
+   *  edge-trigger on the press instead of warping every tick of the hold. */
+  warpHeld = new Set<PlayerId>();
 
   /** Which player this client controls / the camera follows. Server-side this
    *  has no meaning; it's a client convenience that rides along on the world.
@@ -113,6 +119,7 @@ export class World {
    */
   step(ctx: StepContext): void {
     this.tick++;
+    warpSystem(this, ctx);
     movementSystem(this, ctx);
     firingSystem(this, ctx);
     projectileSystem(this);

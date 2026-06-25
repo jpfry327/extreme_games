@@ -28,6 +28,13 @@ export interface InputCommand {
   fire: boolean; // gun
   bomb: boolean; // bomb
 
+  /** Debug/admin command: warp the bot (ChaosBot) to a fixed distance from the
+   *  player who issued it. Edge-triggered server-side (see `warpSystem`), so
+   *  holding the key warps once, not every tick. Optional: absent means "no warp"
+   *  — the same convention the bot's IDLE input and snapshot-replayed commands
+   *  use (they never set it). */
+  warp?: boolean;
+
   /** Server-side lag compensation (M2.9). The server tick the client's *render
    *  view* corresponded to when it sampled this command — the straddling snapshot
    *  ticks blended by the interpolation `t` it was looking through (the firer is
