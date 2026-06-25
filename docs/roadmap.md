@@ -351,22 +351,22 @@ done.**
 This is the direct fix for the *"laggy weapons"* regression.
 
 **Scope:**
-- [ ] On local fire, immediately spawn a **predicted projectile** in the predicted
+- [x] On local fire, immediately spawn a **predicted projectile** in the predicted
       world (reusing `firingSystem`), tagged `predicted` with `owner = localId` and
       the input `seq` that produced it. Debit predicted energy/cooldown locally so
       the HUD and fire-rate feel right.
-- [ ] **Reconciliation / matching:** when a snapshot arrives, match each predicted
+- [x] **Reconciliation / matching:** when a snapshot arrives, match each predicted
       projectile to its server-spawned twin (by owner + spawn seq/id) and **hand
       off** to the authoritative entity, removing the predicted stand-in with no
       visible pop. If the server never spawned it (rejected — e.g. it saw no
       energy), **retract** the prediction.
-- [ ] Predicted projectiles are **replayed** in the prediction step alongside the
+- [x] Predicted projectiles are **replayed** in the prediction step alongside the
       ship, so reconciliation never double-spawns them.
-- [ ] Only the **local** player's own shots are predicted; all other projectiles
+- [x] Only the **local** player's own shots are predicted; all other projectiles
       come from snapshots and are interpolated (M2.2). **Hits and damage stay 100%
       server-authoritative** — prediction is cosmetic-until-confirmed (no predicted
       kills).
-- [ ] Debug HUD: live predicted-vs-reconciled projectile counts; flag
+- [x] Debug HUD: live predicted-vs-reconciled projectile counts; flag
       mispredictions.
 
 **Out of scope:** predicting damage/deaths, predicting items (repel/burst/mines —
@@ -385,17 +385,17 @@ jittery ships) are now gone.**
 in, and move the M1 bot to where it belongs.
 
 **Scope:**
-- [ ] Move the combat bot **server-side**: it's just another player feeding
+- [x] Move the combat bot **server-side**: it's just another player feeding
       `InputCommand`s into the authoritative sim (it was always written
       transport-agnostic — `sim/bot.ts`). Restores it as AI filler, now over the
       net.
-- [ ] Player identity: name chosen client-side, sent in `hello`, shown on
+- [x] Player identity: name chosen client-side, sent in `hello`, shown on
       debug-quality nametags with bounty + ping.
-- [ ] Robust join/leave: clean add/remove, the snapshot reflects the live roster,
+- [x] Robust join/leave: clean add/remove, the snapshot reflects the live roster,
       no ghost ships; reconnect = a fresh join for now.
-- [ ] **Server owns spawn assignment** (`findSpawn` runs on the server); the client
+- [x] **Server owns spawn assignment** (`findSpawn` runs on the server); the client
       never picks position.
-- [ ] Sanity caps: max players, input-rate clamp, snapshot-size sanity — minimal
+- [x] Sanity caps: max players, input-rate clamp, snapshot-size sanity — minimal
       abuse guards, not full anti-cheat.
 
 **Out of scope:** chat, polished UI/nametags (M3), accounts/persistence (Phase 2),
