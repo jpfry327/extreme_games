@@ -230,12 +230,16 @@ worth it. **Do this first; it's free and it's the diagnosis.**
       was batching the tiny input/snapshot/ping frames (a big part of why app-ping
       sat well above the raw network path).
 - [x] **Predicted hit *feedback* (`net/predictedHits.ts`).** The moment one of your
-      predicted shots overlaps an enemy *as drawn*, the burst/spark is shown now and
-      the shot retracted (`Predictor.markHit`), instead of waiting ~1 RTT for the
-      server. Cosmetic only — damage/kills/death stay authoritative (no predicted
-      kills); accepted Subspace-style trade of an occasional miss-burst. This is what
-      masks the fundamental ~1-RTT feedback delay that *no* model (relay included)
-      removes.
+      in-flight shots overlaps an enemy *as drawn*, the burst/spark is shown now and
+      the shot stopped there, instead of waiting ~1 RTT for the server. Covers both
+      *un-acked* shots (retracted from the replay via `Predictor.markHit`) **and
+      acked-but-in-flight** shots (suppressed from the render view by id until the
+      server removes them) — the latter matters because at any real latency a shot is
+      acked ~1 RTT (≈tens of px) after firing, so a combat-range hit is almost always
+      already acked; gating on un-acked alone only ever fired point-blank. Cosmetic
+      only — damage/kills/death stay authoritative (no predicted kills); accepted
+      Subspace-style trade of an occasional miss-burst. This is what masks the
+      fundamental ~1-RTT feedback delay that *no* model (relay included) removes.
 
 **Out of scope:** transport change, serialization change, AOI culling. The
 non-lossy version of the queue fix (client-side send pacing) is a later item.
