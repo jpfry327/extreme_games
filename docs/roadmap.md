@@ -253,43 +253,7 @@ the self-inflicted ~260ms backlog is gone (`ping ≈ ack`), offense *feels* inst
 
 ### M2.12 — UDP-style transport (the head-of-line-blocking fix)
 
-**Goal:** replace TCP/WebSocket with an **unreliable datagram** transport so a lost
-packet *drops* instead of stalling the stream — the single biggest responsiveness
-win, and what makes loss/jitter degrade gracefully (Subspace-style) instead of
-freezing.
-
-**Scope:**
-- [ ] **WebTransport (HTTP/3 / QUIC datagrams)** as the primary transport,
-      implementing the existing `Transport` interface (the swap stays a one-liner
-      in `main.ts`); **WebRTC DataChannel (unordered/unreliable)** as the fallback
-      for environments without WebTransport.
-- [ ] Snapshots and inputs go over the **unreliable** channel (newest-wins; a late
-      snapshot is simply discarded, mirroring Subspace position packets). Keep a
-      **reliable** channel for handshake / chat / kill-feed.
-- [ ] Server side: terminate WebTransport/WebRTC in (or alongside) the Node server;
-      keep the `ClientConnection` seam so `server.ts` / `server/index.ts` stay
-      transport-agnostic.
-- [ ] Update the network simulator to model datagram **loss** (drop, not stall) so
-      tests reflect the new reality.
-- [ ] Deployment notes: Railway UDP / HTTP-3 ingress requirements and the fallback
-      path (this may constrain the host).
-
-**Out of scope:** binary/delta encoding (M2.13), AOI culling (M2.14).
-
-**Playable end state:** at ~100ms with real loss, remote ships stay smooth (no
-stall-jumps) and the build degrades gracefully instead of freezing. **This is the
-make-or-break step for the authoritative model.**
-
-> **Fork in the road (decision gate).** If M2.11 + M2.12 make the game feel like
-> original Subspace at 100ms, continue with M2.13–M2.15 — pure scaling/efficiency,
-> no feel risk. If it *still* feels laggy after honest tuning over UDP, that's the
-> signal that server-authoritative-with-prediction isn't worth its cost here, and
-> the alternative is the **original Subspace client-authoritative relay model**
-> (clients simulate their own ship + weapons, the victim's client reports deaths,
-> the server relays position packets with AOI culling). That would be its own
-> planning pass — lower latency-to-feedback, far cheaper, but cheatable — and it
-> would still reuse the deterministic sim, the AOI seam (M2.14), and the binary
-> protocol (M2.13) built here.
+**DECIDED NOT TO IMPLEMENT THIS!! SKIPPING!!**
 
 ---
 
