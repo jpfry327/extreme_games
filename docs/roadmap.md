@@ -311,30 +311,45 @@ size.
 
 ---
 
-### M2.14 — Area-of-interest culling & stealth filtering
+### M2.14 — Area-of-interest culling & stealth filtering  ✓ (distance AOI; stealth → M5)
 
 **Goal:** fill the per-client `serializeSnapshotFor` filter seam built back in
 M2.0 — send each player only what they can see. The precondition for Subspace's
 "50+ players on screen" and for stealth being server-enforced.
 
-**Scope:**
-- [ ] Distance / weapon-range AOI: include an entity only if it's within view +
-      weapon range of the recipient (mirrors Subspace's `max(WeaponRange, screen)`
-      rule); always include the recipient and their own shots.
-- [ ] Spawn/despawn semantics across the AOI edge so entities entering/leaving view
-      don't smear (reuse stable ids; the interpolator's join/respawn pin already
-      guards this).
-- [ ] Wire **stealth/cloak** into the same filter — this is the server-enforced
-      half of M5's status work; coordinate the seam with M5.
-- [ ] Tests: a far player is absent from the snapshot; crossing the range boundary
-      pops cleanly; a stealthed player is filtered for enemies but not
-      teammates/self.
+**Decision:** M2.14 shipped **distance/AOI culling only**. Stealth/cloak
+concealment was scoped out to M5 to keep the milestone tight; the filter leaves a
+single, marked seam (one per-player predicate in `filterSnapshotFor`) that M5's
+toggle systems plug into without touching the per-client baseline machinery.
 
-**Out of scope:** xradar reveal rules and the rest of M5's toggles (M5 owns those;
-this builds the seam they plug into).
+**Scope:**
+- [x] Distance / weapon-range AOI (`net/aoi.ts`): include an entity only if within
+      view + weapon range of the recipient — a rectangular viewport expanded by
+      `weaponReach` on each axis, mirroring Subspace's `max(WeaponRange, screen)`
+      rule as one cheap AABB. Always include the recipient and their own shots.
+      Constants live in `config.AOI` (`viewHalfWidth/Height`, `hysteresisPx`, and
+      `weaponReach` derived from `SHIPS`).
+- [x] Spawn/despawn semantics across the AOI edge: the delta codec's removal list
+      despawns an entity leaving view and re-adds a full entity on re-entry; an
+      `hysteresisPx` band stops boundary flicker; the interpolator's join/respawn
+      pin makes re-entry pop in without smearing.
+- [x] **Per-client delta baselines** (`net/serverSnapshots.ts`): now that content
+      differs per client, each client keeps its own ring of the *filtered*
+      quantized snapshots it was sent, so deltas diff against exactly what the
+      client holds. The shared world is still quantized **once** per broadcast; the
+      per-client cost is one AABB scan + the delta encode that already ran.
+- [ ] ~~Wire stealth/cloak into the same filter~~ → **deferred to M5** (seam marked
+      in `filterSnapshotFor`).
+- [x] Tests (`net/aoi.test.ts`): predicate boundary + hysteresis; a far player is
+      absent; own shots always sent; crossing the AOI boundary despawns via delta
+      and re-enters as a full entity; delta-equals-full bit-for-bit holds through
+      the filter+channel.
+
+**Out of scope:** stealth/cloak/xradar and the rest of M5's toggles (M5 owns
+those; this builds the seam they plug into).
 
 **Playable end state:** snapshot size scales with *local density*, not arena
-population; stealth actually hides you, server-side.
+population. (Stealth server-enforcement lands when M5 fills the marked seam.)
 
 ---
 

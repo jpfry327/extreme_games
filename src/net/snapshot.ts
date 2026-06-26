@@ -8,8 +8,7 @@
  * would send them as a separate channel (M2.1).
  *
  * `serializeSnapshotFor(world, playerId)` builds a deep copy of the world for
- * one client. The `playerId` parameter is the per-client filter seam: stealth /
- * area-of-interest culling land here in M5. For now we send everything.
+ * one client, filtered to that client's area of interest (M2.14, `net/aoi.ts`).
  *
  * `applySnapshot(clientWorld, snap)` overwrites the client world entirely. The
  * client world is NEVER stepped — it is purely driven by these snapshots.
@@ -17,6 +16,7 @@
 
 import type { GameEvent, Player, PlayerId, Projectile } from "../sim/types";
 import type { World } from "../sim/world";
+import { defaultAoiConfig, filterSnapshotFor } from "./aoi";
 
 /** The per-recipient input ack the server stamps onto each snapshot (M2.3).
  *  Kept as a small struct so `serializeSnapshotFor` callers pass it explicitly
@@ -63,11 +63,11 @@ export interface Snapshot {
  */
 export function serializeSnapshotFor(
   world: World,
-  _playerId: PlayerId,
+  playerId: PlayerId,
   ack: InputAck,
   pings: Record<PlayerId, number> = {},
 ): Snapshot {
-  return structuredClone({
+  const full: Snapshot = {
     tick: world.tick,
     players: [...world.players.values()],
     projectiles: world.projectiles,
@@ -75,7 +75,14 @@ export function serializeSnapshotFor(
     lastProcessedInputSeq: ack.lastProcessedInputSeq,
     inputBufferDepth: ack.inputBufferDepth,
     pings,
-  });
+  };
+  // AOI cull (M2.14), then deep-copy only what's actually sent. No hysteresis
+  // state on the loopback (it has no per-client baseline ring), so a boundary
+  // entity could flicker — but loopback is zero-latency and the interpolator's
+  // join/respawn pin absorbs a clean re-entry, so it's cosmetic. The WebSocket
+  // path (SnapshotChannel) threads hysteresis where it actually matters.
+  const filtered = filterSnapshotFor(full, playerId, defaultAoiConfig());
+  return structuredClone(filtered);
 }
 
 /**

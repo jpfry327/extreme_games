@@ -83,8 +83,19 @@ the M2.11+ responsiveness/efficiency pass is underway. The sequence is:
 ```
 M0 ✓ → M1 ✓ → M2.0–M2.10 ✓ (full netcode model)
      → M2.11 ✓ (measure & tune) → M2.12 ✗ (UDP transport — SKIPPED) → M2.13 ✓ binary+delta
-     → M2.14 AOI/stealth → M2.15 input batching → M3 (UI) → ...
+     → M2.14 ✓ AOI culling (stealth deferred to M5) → M2.15 input batching → M3 (UI) → ...
 ```
+
+M2.14 fills the per-client `serializeSnapshotFor` seam: each client is sent only entities within
+its area of interest (`net/aoi.ts` — a rectangular viewport expanded by `weaponReach`, Subspace's
+`max(WeaponRange, screen)` rule as one AABB), always including self + own shots. `config.AOI` holds
+the tunables (`weaponReach` derived from `SHIPS`). Because content now differs per client, the
+`SnapshotChannel` baseline ring became **per-client**: each client keeps its own ring of the
+*filtered* quantized snapshots it was sent, so a delta diffs against exactly what that client holds
+— an entity leaving AOI is a normal delta removal (clean despawn), one re-entering is a full-entity
+add, and a `hysteresisPx` band stops boundary flicker. The shared world is still quantized once per
+broadcast. **Stealth/cloak concealment is deferred to M5**, which plugs into a single marked
+predicate in `filterSnapshotFor` without touching the baseline machinery.
 
 The three legs of the model: **client prediction** (own ship/shots at present — M2.4/M2.6),
 **entity interpolation** (remotes smoothed in the past — M2.2/M2.8), and **lag compensation**
