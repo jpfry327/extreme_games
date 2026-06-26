@@ -38,6 +38,19 @@ describe("ServerInputBuffer", () => {
     expect(buf.next(P).bomb).toBe(true);
   });
 
+  it("bounds the standing depth, dropping oldest and keeping newest (M2.11)", () => {
+    const buf = new ServerInputBuffer();
+    // Push far more than the jitter-buffer cap (MAX_BUFFERED = 6) without consuming.
+    for (let seq = 1; seq <= 20; seq++) buf.push(P, input(seq, { thrust: true }));
+
+    // Depth is capped, not 20 — no unbounded standing backlog.
+    expect(buf.depth(P)).toBeLessThanOrEqual(6);
+
+    // The retained commands are the newest: the first consumed seq is well past 1.
+    buf.next(P);
+    expect(buf.ack(P)).toBe(20 - 6 + 1); // oldest kept = seq 15
+  });
+
   it("acks only the highest *consumed* seq, advancing one per tick", () => {
     const buf = new ServerInputBuffer();
     buf.push(P, input(1));

@@ -220,12 +220,30 @@ worth it. **Do this first; it's free and it's the diagnosis.**
       Railway link), and read the new overlay to confirm clamps drop and the buffer
       stops starving. Unit/typecheck/build all green.
 
-**Out of scope:** transport change, serialization change, AOI culling.
+**Follow-ups from the first live ~100ms test (all shipped under M2.11):**
+- [x] **Standing input-queue backlog fixed.** The live overlay showed `rtt 355ms`
+      while the network ping was ~95ms: the server consumed one input/tick with no
+      drain, so a burst/drift built a *standing* queue adding ~260ms. `serverInput`
+      now caps the queue at a small jitter buffer (drop oldest); overlay shows true
+      `ping` vs `ack` and the `in-buf` depth so the gap is visible.
+- [x] **TCP_NODELAY + no per-message compression** on the server — Nagle/delayed-ACK
+      was batching the tiny input/snapshot/ping frames (a big part of why app-ping
+      sat well above the raw network path).
+- [x] **Predicted hit *feedback* (`net/predictedHits.ts`).** The moment one of your
+      predicted shots overlaps an enemy *as drawn*, the burst/spark is shown now and
+      the shot retracted (`Predictor.markHit`), instead of waiting ~1 RTT for the
+      server. Cosmetic only — damage/kills/death stay authoritative (no predicted
+      kills); accepted Subspace-style trade of an occasional miss-burst. This is what
+      masks the fundamental ~1-RTT feedback delay that *no* model (relay included)
+      removes.
 
-**Playable end state:** the same architecture, but quantified — you can *see*
-whether stalls or under-compensation dominate, and the cheap tuning (wider rewind
-cap + adaptive delay) has recovered whatever it can without a rewrite. **This is
-the decision input for M2.12.**
+**Out of scope:** transport change, serialization change, AOI culling. The
+non-lossy version of the queue fix (client-side send pacing) is a later item.
+
+**Playable end state:** the same architecture, but quantified and de-laggified —
+the self-inflicted ~260ms backlog is gone (`ping ≈ ack`), offense *feels* instant
+(predicted bursts), and the overlay says whether any remaining pain is the wire
+(loss/stale → M2.12) or fundamental. **This is the decision input for M2.12.**
 
 ---
 

@@ -51,6 +51,26 @@ describe("NetHealth — loss & stale", () => {
     expect(h.perSecond.missed).toBe(1);
   });
 
+  it("does not count normal gaps as loss after an early anomalous small gap", () => {
+    // Regression for the min-gap bug: a single early small gap must not lock the
+    // inferred broadcast step and make every later normal gap read as loss.
+    const h = new NetHealth();
+    let t = 1000;
+    let tick = 0;
+    h.onSnapshot(tick, t);
+    tick += 1; // one anomalous 1-tick gap (e.g. a connect-time hiccup)
+    t += 10;
+    h.onSnapshot(tick, t);
+    for (let i = 0; i < 120; i++) {
+      tick += 3; // the real broadcast step
+      t += 30;
+      h.onSnapshot(tick, t);
+    }
+    runFrames(h, 1.1, gauges());
+    // The mode (3) wins; only a tiny warmup residue, not ~one-per-snapshot.
+    expect(h.perSecond.missed).toBeLessThan(10);
+  });
+
   it("counts out-of-order snapshots as stale", () => {
     const h = new NetHealth();
     h.onStaleSnapshot();
