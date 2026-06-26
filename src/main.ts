@@ -93,6 +93,17 @@ async function main() {
   // How long a predicted boom waits for its server twin before expiring (ms):
   // comfortably past interpDelay + a full RTT so the real duplicate is caught.
   const BOOM_TTL_MS = 600;
+  // M2.11+: own *acked* shots that cosmetically hit an enemy, suppressed from the
+  // render view by projectile id until the server's snapshot stops carrying them
+  // (it detonates/removes them within ~interpDelay) — so a shot that connects
+  // *stops at the enemy* instead of sailing through while the late server burst
+  // catches up. Un-acked shots use the predictor's retract path instead (markHit).
+  const suppressedShotIds = new Map<number, number>(); // projectile id → expiresMs
+  // How long an acked-shot suppression lives if the server somehow never drops the
+  // shot (e.g. it scored a miss): past interpDelay + RTT so the server's removal
+  // normally lands first. On a genuine false positive the shot pops back after this
+  // — rare, since the server lag-comp-rewinds the enemy to ~the pose we drew.
+  const SHOT_SUPPRESS_TTL_MS = 400;
 
   // 3. Input + renderer — initialize NOW so the canvas is on screen while we
   //    connect. The game loop starts immediately in "connecting…" mode.
@@ -306,7 +317,14 @@ async function main() {
       // a shot the server scores as a miss draws a burst that did no damage.
       const enemies = [...view.players.values()].filter((p) => p.id !== view.localPlayerId);
       for (const hit of hitDetector.detect(predictor.predictedProjectiles, enemies)) {
-        predictor.markHit(hit.seq); // retract from the next rebuild (no fly-through)
+        // Stop the shot at the enemy. An un-acked predicted shot is retracted from
+        // the replay (it never re-spawns); an acked shot lives in the snapshot
+        // stream, so suppress it from the view by id until the server removes it.
+        if (hit.spawnSeq !== undefined) {
+          predictor.markHit(hit.spawnSeq); // retract from the next rebuild (no fly-through)
+        } else {
+          suppressedShotIds.set(hit.projectileId, now + SHOT_SUPPRESS_TTL_MS);
+        }
         if (hit.kind === "bomb") {
           view.events.push({ type: "bombExploded", x: hit.x, y: hit.y, owner: view.localPlayerId });
           // Suppress the delayed server copy of this explosion (reuses the M2.10 path).
@@ -333,10 +351,16 @@ async function main() {
       // Skip any that cosmetically detonated this frame (the predictor retracts them
       // from the next rebuild; this hides them the same frame they detonate).
       for (const p of predictor.predictedProjectiles) {
-        if (p.spawnSeq !== undefined && hitDetector.isHit(p.spawnSeq)) continue;
+        if (hitDetector.isHit(p.id)) continue; // detonated this frame — hide it now
+        const suppressedUntil = suppressedShotIds.get(p.id);
+        if (suppressedUntil !== undefined && suppressedUntil > now) continue; // acked hit
         view.projectiles.push(p);
       }
-      hitDetector.prune(inputMgr.lastAckedSeq);
+      // Expire acked-shot suppressions; the server has long since removed any shot
+      // it scored, so a lingering entry means a (rare) false positive — let it go.
+      for (const [id, expiresMs] of suppressedShotIds) {
+        if (expiresMs <= now) suppressedShotIds.delete(id);
+      }
 
       // M2.10: surface this frame's predicted own-bomb *wall* detonations (deduped)
       // as real bombExploded events so the renderer draws them *now*, not a

@@ -30,12 +30,12 @@ function enemyAt(x: number, y: number): Player {
 }
 
 describe("PredictedHitDetector", () => {
-  it("reports an overlap of a predicted shot with an enemy", () => {
+  it("reports an overlap of an un-acked predicted shot with an enemy", () => {
     const d = new PredictedHitDetector();
     const enemy = enemyAt(100, 100);
-    const hits = d.detect([proj(100, 100, { spawnSeq: 5, kind: "bomb" })], [enemy]);
+    const hits = d.detect([proj(100, 100, { id: -11, spawnSeq: 5, kind: "bomb" })], [enemy]);
     expect(hits).toHaveLength(1);
-    expect(hits[0]).toMatchObject({ kind: "bomb", target: "e1", seq: 5, x: 100, y: 100 });
+    expect(hits[0]).toMatchObject({ kind: "bomb", target: "e1", projectileId: -11, spawnSeq: 5, x: 100, y: 100 });
   });
 
   it("does not report a shot that misses", () => {
@@ -44,10 +44,15 @@ describe("PredictedHitDetector", () => {
     expect(d.detect([proj(200, 200)], [enemy])).toHaveLength(0);
   });
 
-  it("ignores already-acked shots (no spawnSeq)", () => {
+  it("reports an acked in-flight shot (no spawnSeq) — it's still a sprite on screen", () => {
     const d = new PredictedHitDetector();
     const enemy = enemyAt(100, 100);
-    expect(d.detect([proj(100, 100, { spawnSeq: undefined })], [enemy])).toHaveLength(0);
+    // Acked shots carry a stable positive server id and no spawnSeq; they're drawn
+    // at the leading edge just like un-acked ones, so they must still register.
+    const hits = d.detect([proj(100, 100, { id: 42, spawnSeq: undefined })], [enemy]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ projectileId: 42, target: "e1" });
+    expect(hits[0].spawnSeq).toBeUndefined(); // tells the caller to suppress by id
   });
 
   it("ignores dead/respawning enemies", () => {
@@ -57,22 +62,23 @@ describe("PredictedHitDetector", () => {
     expect(d.detect([proj(100, 100)], [ghost])).toHaveLength(0);
   });
 
-  it("detonates a given shot only once", () => {
+  it("detonates a given shot only once, keyed by projectile id", () => {
     const d = new PredictedHitDetector();
     const enemy = enemyAt(100, 100);
-    const shot = proj(100, 100, { spawnSeq: 7 });
+    const shot = proj(100, 100, { id: 7, spawnSeq: undefined });
     expect(d.detect([shot], [enemy])).toHaveLength(1);
     expect(d.isHit(7)).toBe(true);
     // Same shot still overlapping next frame — not reported again.
     expect(d.detect([shot], [enemy])).toHaveLength(0);
   });
 
-  it("prunes hit seqs at/below the server ack so the set can't grow unbounded", () => {
+  it("prunes a hit id once the shot is no longer in flight, bounding the set", () => {
     const d = new PredictedHitDetector();
     const enemy = enemyAt(100, 100);
-    d.detect([proj(100, 100, { spawnSeq: 3 })], [enemy]);
+    d.detect([proj(100, 100, { id: 3, spawnSeq: undefined })], [enemy]);
     expect(d.isHit(3)).toBe(true);
-    d.prune(3); // server has acked seq 3
+    // Next frame the server has removed the shot (it's gone from the list).
+    d.detect([], [enemy]);
     expect(d.isHit(3)).toBe(false);
   });
 });
