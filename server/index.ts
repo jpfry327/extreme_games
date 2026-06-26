@@ -125,7 +125,16 @@ const httpServer = createServer((_req, res) => {
   res.writeHead(200, { "content-type": "text/plain" });
   res.end("extreme_games server ok\n");
 });
-const wss = new WebSocketServer({ server: httpServer });
+// Disable Nagle's algorithm on every TCP connection (the WS upgrades ride these).
+// Nagle batches small writes and, with delayed ACKs, can add tens of ms of latency
+// to exactly the kind of traffic we send — tiny per-tick input frames, snapshots,
+// and ping/pong — which is why the app-level ping reads well above the raw network
+// path. Realtime games always want this off. (M2.11)
+httpServer.on("connection", (socket) => socket.setNoDelay(true));
+// `perMessageDeflate: false` — don't compress snapshots. Per-message compression
+// adds CPU per broadcast (costly on a shared/free instance) and latency for no real
+// win on already-small JSON; binary+delta (M2.13) is the right size lever. (M2.11)
+const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false });
 httpServer.listen(PORT, () => {
   console.info(`[server] listening on port ${PORT}`);
 });

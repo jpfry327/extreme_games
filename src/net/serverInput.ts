@@ -16,9 +16,9 @@
  * only advances on a *real* consumed command, never on a repeat, so it always
  * names the highest input the server genuinely acted on.
  *
- * This buffering is deliberately mechanism-only: M2.3 changes no gameplay. The
- * abuse guards (max queue depth, rate clamps) are M2.7 — the soft cap here just
- * bounds memory.
+ * This buffering is deliberately mechanism-only: M2.3 changes no gameplay. M2.11
+ * adds a small **standing-depth cap** (`MAX_BUFFERED`) so the queue stays a jitter
+ * buffer rather than a latency-adding backlog — see the constant for the why.
  */
 
 import type { InputCommand, PlayerId } from "../sim/types";
@@ -34,11 +34,28 @@ const IDLE: InputCommand = {
   bomb: false,
 };
 
-/** Soft cap on a single player's pending queue. At 100Hz this is ~10s of
- *  backlog — far beyond any healthy buffer; hitting it means the client is
- *  flooding or wildly clock-skewed, so we drop the oldest. Real abuse guards
- *  (rate clamps, kicks) land in M2.7. */
-const MAX_PENDING = 1000;
+/** Target standing depth of a player's input queue, in ticks (M2.11).
+ *
+ *  The queue is meant to be a tiny **jitter buffer**, not a backlog. The client
+ *  sends ~1 command per 10ms tick and the server consumes ~1 per tick, so the two
+ *  rates match — which means there is *no* mechanism that drains a standing queue
+ *  once one forms. A one-time burst (a tab-switch rAF catch-up sends up to 25
+ *  commands at once) or slow client/server clock drift therefore builds a queue
+ *  that simply *stays*, and every later command then waits `depth` ticks before it
+ *  is processed: `depth × 10ms` of pure added latency. That was the "rtt 355ms
+ *  while the network ping is ~95ms" bug — ~26 ticks of standing backlog.
+ *
+ *  Capping the depth bounds that added latency to ~`MAX_BUFFERED × 10ms`. Excess
+ *  *oldest* commands are dropped; the client re-predicts and reconciles the few
+ *  lost ticks (M2.4/M2.6), so the cost is an occasional small correction, not lag.
+ *  6t ≈ 60ms — loose enough to absorb a normal clump of inputs that TCP delivered
+ *  together, tight enough that a backlog can't add more than ~60ms. The live depth
+ *  is on the debug overlay (`in-buf`), so this can be tuned down with real data.
+ *
+ *  NOTE: dropping is mildly lossy. The principled, non-lossy fix is client-side
+ *  send pacing against the server-reported depth (a later milestone); this is the
+ *  cheap, predictable version that kills the pathological standing backlog now. */
+const MAX_BUFFERED = 6;
 
 /** One player's ordered command queue. */
 class PlayerQueue {
@@ -67,7 +84,10 @@ class PlayerQueue {
     if (i > 0 && this.pending[i - 1].seq === input.seq) return; // duplicate
     this.pending.splice(i, 0, input);
 
-    if (this.pending.length > MAX_PENDING) this.pending.shift();
+    // Bound the standing depth to a small jitter buffer: drop the oldest beyond
+    // MAX_BUFFERED so a burst or clock drift can't build a backlog that adds
+    // depth×10ms of latency to every later command (M2.11). Keeps the newest.
+    while (this.pending.length > MAX_BUFFERED) this.pending.shift();
   }
 
   /** Consume the command for one tick: the lowest pending `seq`, or — if none has

@@ -60,8 +60,12 @@ async function main() {
   // M2.11: drive the interpolation delay from the measured link instead of a fixed
   // 75ms, so a jittery connection stops starving the buffer (remote ships jumping).
   const adaptiveInterp = new AdaptiveInterpDelay(NET.adaptiveInterp, NET.interpDelayMs);
+  // Latest server-reported input-queue depth for us — the standing-backlog signal
+  // (M2.11). A high `in-buf` means our inputs are waiting in the server queue =
+  // added latency (the gap between true ping and ack-RTT).
+  let serverInputDepth = 0;
   // Latest server-measured RTT (ms) per player, from the snapshot — drives the
-  // ping shown on nametags (M2.7).
+  // ping shown on nametags (M2.7) and the true-ping line on the overlay.
   let latestPings: Record<string, number> = {};
   // Newest snapshot tick we've accepted. Jitter (esp. with the network sim) can
   // deliver snapshots out of order; an older-tick snapshot is stale — we already
@@ -165,6 +169,7 @@ async function main() {
     } else {
       inputMgr.ack(snap.lastProcessedInputSeq, now);
     }
+    serverInputDepth = snap.inputBufferDepth;
     latestPings = snap.pings;
   });
 
@@ -384,9 +389,15 @@ async function main() {
     });
     const hps = health.perSecond;
 
+    // `ping` is the true network RTT (WS ping/pong); `ack` is the input round-trip
+    // incl. server-queue wait + broadcast batching. A large ack−ping gap = a
+    // standing input backlog (`in-buf`), the M2.11 latency bug. They should now sit
+    // close together.
+    const ping = Math.round(latestPings[view.localPlayerId] ?? 0);
     netdebug.textContent =
       `── netcode (M2.11) ──\n` +
-      `rtt ${inputMgr.rttMs.toFixed(0)}ms  jitter ±${health.jitterMs.toFixed(0)}ms\n` +
+      `ping ${ping}ms  ack ${inputMgr.rttMs.toFixed(0)}ms\n` +
+      `jitter ±${health.jitterMs.toFixed(0)}ms  in-buf ${serverInputDepth}\n` +
       `interp ${interpMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
       `loss ${hps.missed}/s  stale ${hps.stale}/s\n` +
       `extrap ${hps.extrapFrames}/s  freeze ${hps.freezeFrames}/s\n` +

@@ -70,10 +70,15 @@ export class NetHealth {
 
   // --- snapshot tick tracking (for loss) ---
   private lastSnapTick = -1;
-  /** Smallest positive server-tick gap seen = the broadcast step. Loss is any gap
-   *  that's a multiple of it. Discovered from the stream so the client needn't know
-   *  the server's `BROADCAST_EVERY`. */
+  /** The broadcast step = the **most common** positive server-tick gap (the mode),
+   *  discovered from the stream so the client needn't know the server's
+   *  `BROADCAST_EVERY`. Loss is then any gap that's a larger multiple of it.
+   *  (A plain *minimum* would lock onto a single early small gap — e.g. a hiccup on
+   *  connect — and then count every normal gap as loss, the M2.11 "loss 33/s while
+   *  jitter ±1ms" artifact.) */
   private tickStep = 0;
+  private tickStepCount = 0;
+  private readonly gapCounts = new Map<number, number>();
 
   // --- per-second rollup ---
   private windowMs = 0;
@@ -109,7 +114,13 @@ export class NetHealth {
     if (this.lastSnapTick >= 0) {
       const gap = tick - this.lastSnapTick;
       if (gap > 0) {
-        if (this.tickStep === 0 || gap < this.tickStep) this.tickStep = gap;
+        // Track the mode of gaps as the broadcast step (robust to an early outlier).
+        const c = (this.gapCounts.get(gap) ?? 0) + 1;
+        this.gapCounts.set(gap, c);
+        if (c > this.tickStepCount) {
+          this.tickStep = gap;
+          this.tickStepCount = c;
+        }
         if (this.tickStep > 0) {
           // A gap of k× the broadcast step means (k−1) snapshots never arrived.
           this.accruing.missed += Math.max(0, Math.round(gap / this.tickStep) - 1);
