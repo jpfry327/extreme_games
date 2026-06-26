@@ -103,6 +103,13 @@ export class Predictor {
    *  against the authoritative pose for the acked `seq`. Pruned as inputs ack. */
   private readonly predictedPose = new Map<number, PredictedPose>();
 
+  /** Spawn-seqs of own projectiles that have cosmetically detonated on an enemy
+   *  (M2.11 predicted-hit feedback). A projectile here is removed from the predicted
+   *  world the moment it spawns during replay, so it neither flies *through* the
+   *  enemy nor wall-detonates a second time later — it visually ends at the enemy.
+   *  Pure client cosmetics; the server still adjudicates the real hit. */
+  private readonly retracted = new Set<number>();
+
   /** Distance (px) between the predicted and authoritative local pose at the last
    *  acked `seq`. ≈0 under clean conditions proves client/server determinism
    *  parity. Surfaced on the netcode debug overlay. */
@@ -136,6 +143,13 @@ export class Predictor {
       return null;
     }
 
+    // Drop retracted seqs the server has now acked: they're gone from the replay
+    // below, so they can't respawn to be retracted again. Keeps the set bounded.
+    if (this.retracted.size > 0) {
+      const minSeq = unacked.length > 0 ? unacked[0].seq : Infinity;
+      for (const s of this.retracted) if (s < minSeq) this.retracted.delete(s);
+    }
+
     // Reset to the authoritative rewind point. structuredClone so step()'s
     // in-place mutation never corrupts the stored snapshot. Seed the already-acked
     // local projectiles (M2.6) so the replay advances them to the leading edge.
@@ -164,6 +178,13 @@ export class Predictor {
         // a stable negative view id so it's identifiable across rebuilds.
         p.spawnSeq = input.seq;
         p.id = predictedProjectileId(input.seq, p.kind);
+      }
+      // Retract any shot that cosmetically detonated on an enemy (M2.11): remove it
+      // right after it spawns so it never flies on or wall-detonates in later ticks.
+      if (this.retracted.size > 0) {
+        this.world.projectiles = this.world.projectiles.filter(
+          (p) => p.spawnSeq === undefined || !this.retracted.has(p.spawnSeq),
+        );
       }
       // Capture this step's own-bomb detonations, tagged with the tick they fire
       // on (the replay accumulates events; we slice off only the new ones). M2.10.
@@ -222,5 +243,13 @@ export class Predictor {
     for (const seq of this.predictedPose.keys()) {
       if (seq <= ackedSeq) this.predictedPose.delete(seq);
     }
+  }
+
+  /** Retract a predicted shot (by spawning input `seq`) because it cosmetically
+   *  detonated on an enemy this frame (M2.11). From the next rebuild on it's removed
+   *  the instant it spawns, so it ends at the enemy instead of flying through or
+   *  wall-detonating later. Cosmetic only — the server still scores the real hit. */
+  markHit(seq: number): void {
+    this.retracted.add(seq);
   }
 }

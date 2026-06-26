@@ -14,6 +14,7 @@ import { Predictor } from "./net/prediction";
 import { ReconciliationSmoother } from "./net/reconciliationSmoother";
 import { NetHealth } from "./net/netHealth";
 import { AdaptiveInterpDelay } from "./net/adaptiveInterp";
+import { PredictedHitDetector } from "./net/predictedHits";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
 // above for these two and uncomment the loopback block below:
@@ -53,6 +54,10 @@ async function main() {
   // render-offset that decays to zero, so a correction is a gentle pull instead
   // of a snap. Zero offset in steady state — adds no latency.
   const smoother = new ReconciliationSmoother();
+  // M2.11: instant cosmetic hit feedback — draws the burst/spark the moment one of
+  // our predicted shots overlaps an enemy as drawn, instead of a round-trip later.
+  // Damage/kills stay server-authoritative.
+  const hitDetector = new PredictedHitDetector();
   // M2.11: network-health telemetry (jitter, snapshot loss/stalls, buffer depth,
   // extrapolation/freeze + comp-clamp rates) for the debug overlay, and the
   // interval/jitter feed for the adaptive interpolation delay below.
@@ -291,15 +296,53 @@ async function main() {
       // M2.5: ease in any pending reconciliation correction rather than snapping.
       smoother.apply(predLocal.kinematics, dt);
       view.players.set(view.localPlayerId, predLocal);
+
+      // M2.11 predicted-hit feedback: the instant one of our predicted shots
+      // overlaps an enemy *as drawn* (predicted shot at present vs the enemy
+      // interpolated in the past — the two sprites on screen), draw its burst/spark
+      // now instead of ~1 RTT later, and retract the shot so it ends there. This is
+      // cosmetic only — damage, kills, and the death explosion stay 100%
+      // server-authoritative (no predicted kills). Accepted trade (as in Subspace):
+      // a shot the server scores as a miss draws a burst that did no damage.
+      const enemies = [...view.players.values()].filter((p) => p.id !== view.localPlayerId);
+      for (const hit of hitDetector.detect(predictor.predictedProjectiles, enemies)) {
+        predictor.markHit(hit.seq); // retract from the next rebuild (no fly-through)
+        if (hit.kind === "bomb") {
+          view.events.push({ type: "bombExploded", x: hit.x, y: hit.y, owner: view.localPlayerId });
+          // Suppress the delayed server copy of this explosion (reuses the M2.10 path).
+          shownLocalBooms.push({ x: hit.x, y: hit.y, expiresMs: now + BOOM_TTL_MS });
+        } else {
+          // Bullet/EMP spark on the struck enemy. No server-twin suppression: the
+          // server's spark arrives within an RTT and the two brief flashes overlap.
+          view.events.push({
+            type: "shipHit",
+            by: view.localPlayerId,
+            target: hit.target,
+            x: hit.x,
+            y: hit.y,
+            damage: 0,
+            fatal: false,
+            rewound: false,
+          });
+        }
+      }
+
       // M2.6: our own shots come from the predictor (leading edge) instead of the
       // interpolated snapshot stream (the interpolator skipped them). Appended so
       // they fire instantly and hand off seamlessly to their server twin on ack.
-      for (const p of predictor.predictedProjectiles) view.projectiles.push(p);
-      // M2.10: surface this frame's predicted own-bomb detonations (deduped) as
-      // real bombExploded events so the renderer draws them *now*, not a round-trip
-      // later. Record each so its delayed server twin is suppressed above next
-      // frame. The bomb still detonates server-authoritatively for damage — this
-      // is the explosion *animation* only.
+      // Skip any that cosmetically detonated this frame (the predictor retracts them
+      // from the next rebuild; this hides them the same frame they detonate).
+      for (const p of predictor.predictedProjectiles) {
+        if (p.spawnSeq !== undefined && hitDetector.isHit(p.spawnSeq)) continue;
+        view.projectiles.push(p);
+      }
+      hitDetector.prune(inputMgr.lastAckedSeq);
+
+      // M2.10: surface this frame's predicted own-bomb *wall* detonations (deduped)
+      // as real bombExploded events so the renderer draws them *now*, not a
+      // round-trip later. Record each so its delayed server twin is suppressed next
+      // frame. The bomb still detonates server-authoritatively for damage — this is
+      // the explosion *animation* only.
       for (const boom of predictor.drainNewExplosions()) {
         view.events.push({ type: "bombExploded", x: boom.x, y: boom.y, owner: view.localPlayerId });
         shownLocalBooms.push({ x: boom.x, y: boom.y, expiresMs: now + BOOM_TTL_MS });

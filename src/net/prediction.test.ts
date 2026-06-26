@@ -200,6 +200,24 @@ describe("Predictor — projectiles", () => {
     expect(predictor.predictedProjectiles[0].spawnSeq).toBeUndefined();
   });
 
+  it("retracts a predicted shot after markHit (M2.11 cosmetic hit) so it leaves the rebuild", () => {
+    const predictor = new Predictor(openMap());
+    const world = new World(openMap(), 1);
+    predictor.setAuthoritative(structuredClone(world.localPlayer), [], world.tick);
+
+    // One un-acked fire → a predicted bullet spawns and is rendered.
+    const fire = seqInput(world.tick + 1, cmd({ fire: true }));
+    predictor.predict([fire], LOCAL_PLAYER_ID);
+    expect(predictor.predictedProjectiles.length).toBe(1);
+    const seq = predictor.predictedProjectiles[0].spawnSeq!;
+
+    // Cosmetic hit on an enemy → retract it. The next rebuild drops it entirely,
+    // so it ends at the enemy instead of flying on / wall-detonating later.
+    predictor.markHit(seq);
+    predictor.predict([fire], LOCAL_PLAYER_ID);
+    expect(predictor.predictedProjectiles.length).toBe(0);
+  });
+
   it("does not double-spawn a shot whose fire input is already acked (seeded, not replayed)", () => {
     const ref = new World(openMap(), 1);
     ref.step(ctx(cmd({ fire: true }))); // bullet from the now-acked fire
