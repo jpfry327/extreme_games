@@ -86,15 +86,18 @@ export class WebSocketTransport implements Transport {
     });
   }
 
-  sendInput(input: SequencedInput): void {
+  sendInput(inputs: readonly SequencedInput[]): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    if (inputs.length === 0) return;
+    // M2.15: one datagram per batch (a frame's coalesced ticks + redundancy).
     // Piggyback the snapshot ack (M2.13): tell the server the newest tick we've
     // decoded so it deltas the next snapshot against that baseline. Omit until the
     // first snapshot arrives, so the server keyframes the opening frames.
+    const list = inputs as SequencedInput[];
     const msg: ClientMsg =
       this.ackSnapshotTick >= 0
-        ? { type: "input", input, ackSnapshotTick: this.ackSnapshotTick }
-        : { type: "input", input };
+        ? { type: "input", inputs: list, ackSnapshotTick: this.ackSnapshotTick }
+        : { type: "input", inputs: list };
     this.send(msg);
   }
 

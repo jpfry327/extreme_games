@@ -165,6 +165,28 @@ export const COMBAT = {
   killPointsBase: 0,
 } as const;
 
+// --- Upstream input batching (M2.15) -----------------------------------------
+// The client coalesces a render frame's per-tick commands into one datagram and
+// re-sends the newest few un-acked inputs for redundancy, instead of one framed
+// message per 10ms tick (~100 msg/s). The server consumes one command per tick
+// and dedups the redundant overlap by `seq`, so the inputs themselves and the
+// M2.4 replay are unchanged — only the wire packaging differs.
+export const INPUT = {
+  /** Upstream flush cadence (ms). ~16ms ≈ one per render frame ≈ 60Hz, which
+   *  sends inputs at essentially the same instant they go out today → ~0 added
+   *  uplink latency, just coalesced (~100 → ~60 msg/s). Raise toward ~33ms
+   *  (~30Hz) to cut packets further at the cost of up to that much added
+   *  input-uplink latency (NOT the downstream view of other players, which is
+   *  untouched). */
+  sendIntervalMs: 16,
+
+  /** Redundancy: the newest N un-acked inputs are included in every datagram, so
+   *  a single dropped datagram is covered by the next one without a round-trip.
+   *  ~10 covers several lost datagrams at 60Hz; inputs are tiny so the byte cost
+   *  is negligible, and the server dedups the overlap by `seq`. */
+  redundantTicks: 10,
+} as const;
+
 // --- Networking (M2) ---------------------------------------------------------
 // Client-side netcode tuning. The server's port + broadcast rate live in
 // server/index.ts; these are values the browser client needs.

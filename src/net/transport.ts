@@ -20,8 +20,10 @@ export type SnapshotHandler = (snap: Snapshot) => void;
 
 /** The client-side view of the transport. One instance per client session. */
 export interface Transport {
-  /** Send one sequenced command (one per sim tick) to the server (M2.3). */
-  sendInput(input: SequencedInput): void;
+  /** Send one datagram of sequenced commands to the server (M2.15). The batch is
+   *  a frame's coalesced tick-commands plus redundant recent un-acked ones,
+   *  ascending by `seq`; the server consumes new ones and dedups the overlap. */
+  sendInput(inputs: readonly SequencedInput[]): void;
   /** Register the callback that receives each incoming snapshot. */
   setSnapshotHandler(cb: SnapshotHandler): void;
   start(): void;
@@ -48,9 +50,11 @@ export class LoopbackTransport implements Transport, ClientConnection {
     server.connectClient(this);
   }
 
-  /** Send the local player's sequenced command to the server. */
-  sendInput(input: SequencedInput): void {
-    this.server.enqueueInput(this.localPlayerId, input);
+  /** Enqueue the batch's commands to the server, immediately (zero latency). The
+   *  server buffer dedups any redundant re-send by `seq`, so the overlap is a
+   *  cheap no-op — same contract as the real socket. */
+  sendInput(inputs: readonly SequencedInput[]): void {
+    for (const input of inputs) this.server.enqueueInput(this.localPlayerId, input);
   }
 
   setSnapshotHandler(cb: SnapshotHandler): void {

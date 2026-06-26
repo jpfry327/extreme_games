@@ -10,6 +10,7 @@ import { SimulatedTransport } from "./net/networkSimulator";
 import { SnapshotInterpolator, pickStraddlingPair } from "./net/interpolation";
 import { RemoteProjectileSimulator } from "./net/remoteProjectiles";
 import { ClientInputManager } from "./net/clientInput";
+import { InputSender } from "./net/inputSender";
 import { Predictor } from "./net/prediction";
 import { ReconciliationSmoother } from "./net/reconciliationSmoother";
 import { NetHealth } from "./net/netHealth";
@@ -46,6 +47,10 @@ async function main() {
   // holds the un-acked ring buffer. Snapshots ack by seq; prediction (M2.4) will
   // replay the survivors. Nothing is corrected yet — this is the data plane only.
   const inputMgr = new ClientInputManager();
+  // Upstream batching (M2.15): coalesces a frame's tick-commands into one datagram
+  // (~60Hz, not ~100Hz of individual frames) and re-sends the newest few un-acked
+  // inputs for redundancy, so a dropped datagram is covered without a round-trip.
+  const inputSender = new InputSender();
   // Prediction (M2.4): a third, predicted world holding only the local player.
   // Each frame it resets to the latest acked snapshot and replays the un-acked
   // inputs, so the local ship reacts instantly instead of lagging by RTT.
@@ -276,9 +281,11 @@ async function main() {
     const renderTick = interp.renderTick(now, interpMs, NET.extrapolateMaxMs);
     const sample = keyboard.sample();
     const stamped = renderTick !== null ? { ...sample, renderTick } : sample;
-    for (const input of inputMgr.produce(dt, stamped, now)) {
-      transport.sendInput(input);
-    }
+    // Produce every tick's command as before (M2.3 stream + M2.4 replay buffer
+    // unchanged), but M2.15 batches the actual wire send: one datagram per ~16ms
+    // carrying this frame's new commands plus a few redundant un-acked ones.
+    inputMgr.produce(dt, stamped, now);
+    inputSender.update(dt, inputMgr.unacked, now, (batch) => transport.sendInput(batch));
 
     // --- loopback only: advance the in-process server (bot runs server-side) ---
     // const alpha = server.advance(dt);
@@ -465,6 +472,9 @@ async function main() {
       `── netcode (M2.11) ──\n` +
       `ping ${ping}ms  ack ${inputMgr.rttMs.toFixed(0)}ms\n` +
       `jitter ±${health.jitterMs.toFixed(0)}ms  in-buf ${serverInputDepth}\n` +
+      // M2.15 upstream: datagram send rate (down from ~100/s), inputs per datagram,
+      // and the redundancy depth that lets a dropped one recover without a round-trip.
+      `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}\n` +
       `interp ${interpMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
       `loss ${hps.missed}/s  stale ${hps.stale}/s\n` +
       `extrap ${hps.extrapFrames}/s  freeze ${hps.freezeFrames}/s\n` +

@@ -62,8 +62,11 @@ export class SimulatedTransport implements Transport {
     this.inner.start();
   }
 
-  sendInput(input: SequencedInput): void {
-    this.schedule(() => this.inner.sendInput(input));
+  sendInput(inputs: readonly SequencedInput[]): void {
+    // Schedule the whole batch as a unit: a simulated drop/jitter hits the
+    // datagram as a whole, which is exactly the loss the M2.15 redundancy is
+    // designed to survive.
+    this.schedule(() => this.inner.sendInput(inputs));
   }
 
   setSnapshotHandler(cb: SnapshotHandler): void {
