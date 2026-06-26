@@ -285,3 +285,43 @@ export const LAGCOMP = {
    *  recorded; 120t = 1.2s leaves ample room). */
   maxCompTicks: 25,
 } as const;
+
+// --- Area-of-interest culling (M2.14) ----------------------------------------
+// Each client is sent only the entities near it — the per-client snapshot filter
+// (`net/aoi.ts`) mirrors Subspace's `max(WeaponRange, screen)` rule. M2.14 does
+// distance culling only; stealth/cloak concealment plugs into the same filter in
+// M5. Snapshot size then scales with local density, not arena population.
+
+/** Longest distance (px) any weapon can travel = max over authored ships of
+ *  `speed * lifetimeTicks` (a bullet bounces but still dies at its lifetime, so
+ *  that product is its true reach). Recomputed from `SHIPS` so it tracks config
+ *  as the remaining ships are authored in M4. Floored so a partial table still
+ *  yields a sane AOI. */
+function computeWeaponReach(): number {
+  let reach = 512; // floor — covers an empty/partial ship table
+  for (const ship of Object.values(SHIPS)) {
+    if (!ship) continue;
+    reach = Math.max(
+      reach,
+      ship.bullet.speed * ship.bullet.lifetimeTicks,
+      ship.bomb.speed * ship.bomb.lifetimeTicks,
+    );
+  }
+  return reach;
+}
+
+export const AOI = {
+  /** Screen half-extents (px) a client can see around its ship. The include test
+   *  is rectangular (a viewport, like Subspace) expanded by `weaponReach` on each
+   *  axis — i.e. you receive anything on your screen OR close enough to shoot you,
+   *  which is the `max(WeaponRange, screen)` rule in AABB form. ~1520×1200 view. */
+  viewHalfWidth: 760,
+  viewHalfHeight: 600,
+  /** Longest weapon reach (px), derived from `SHIPS` (see above). Added to the
+   *  view half-extents so a long-range bomb stream is received before it's drawn. */
+  weaponReach: computeWeaponReach(),
+  /** Hysteresis band (px) added to the include box for entities the viewer
+   *  already received last broadcast, so an entity hovering at the boundary
+   *  doesn't flicker in/out every frame. ~2 ship-radii of slack. */
+  hysteresisPx: 96,
+} as const;

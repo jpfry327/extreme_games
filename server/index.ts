@@ -70,9 +70,10 @@ world.addPlayer(BOT_ID, BOT_NAME, 1, WARBIRD);
 // the step provider below; acked back to each client in its snapshot.
 const inputs = new ServerInputBuffer();
 
-// Binary snapshot delta channel (M2.13). Holds each client's acked baseline and
-// a shared ring of recent quantized snapshots; turns the authoritative world into
-// a per-client delta-compressed binary frame (keyframe when no baseline is usable).
+// Binary snapshot delta channel (M2.13) + per-client AOI culling (M2.14). Holds
+// each client's acked baseline ring of the *filtered* snapshots it was sent, and
+// turns the one shared quantized world into a per-client, AOI-culled, delta-
+// compressed binary frame (keyframe when no baseline is usable).
 const snapshots = new SnapshotChannel();
 
 // ---------- client registry ---------------------------------------------------
@@ -125,10 +126,10 @@ function buildSharedSnapshot(pings: Record<PlayerId, number>): Snapshot {
 function broadcast(): void {
   const pings = pingMap();
   // One quantize per broadcast (fresh, f32-rounded objects), shared by every
-  // client as both the encode source and the next baseline — this is the CPU win
-  // over the old O(players × clients) clone.
+  // client as the encode source — this is the CPU win over the old O(players ×
+  // clients) clone. encodeFor AOI-filters it per client and retains each client's
+  // own filtered subset as that client's baseline (M2.14).
   const quantized = quantizeSnapshot(buildSharedSnapshot(pings));
-  snapshots.record(quantized);
   for (const s of sessions) {
     if (s.ws.readyState !== WebSocket.OPEN) continue;
     const bytes = snapshots.encodeFor(

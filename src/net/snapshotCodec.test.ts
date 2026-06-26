@@ -208,6 +208,9 @@ describe("snapshot codec — entity add / remove", () => {
 describe("SnapshotChannel — server-side baseline selection", () => {
   it("keyframes until the client acks, then deltas against the acked tick", () => {
     const channel = new SnapshotChannel();
+    // `client` is a viewer absent from the snapshot (its players are "me"/"enemy"),
+    // so the AOI filter (M2.14) is a pass-through here — this test isolates the
+    // baseline-selection behavior; the cull paths are covered in aoi.test.ts.
     const client = "p1";
     const snaps = snapshotSequence(2024).slice(0, 4).map(quantizeSnapshot);
     const clientBaselines = new Map<number, Snapshot>();
@@ -215,7 +218,6 @@ describe("SnapshotChannel — server-side baseline selection", () => {
       decodeSnapshot(bytes, (t) => clientBaselines.get(t));
 
     // First broadcast: no ack yet → keyframe (decodes with no baseline).
-    channel.record(snaps[0]);
     const b0 = channel.encodeFor(client, snaps[0], 0, 0);
     const d0 = decode(b0);
     expect(d0).toEqual(snaps[0]);
@@ -224,7 +226,6 @@ describe("SnapshotChannel — server-side baseline selection", () => {
     // Client acks tick0; next broadcast must delta against it. Proven by decoding
     // it *only* with tick0 available as a baseline.
     channel.onAck(client, d0.tick);
-    channel.record(snaps[1]);
     const b1 = channel.encodeFor(client, snaps[1], 0, 0);
     const d1 = decode(b1);
     expect(d1).toEqual(snaps[1]);
