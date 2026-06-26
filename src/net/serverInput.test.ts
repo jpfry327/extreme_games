@@ -92,6 +92,19 @@ describe("ServerInputBuffer", () => {
     expect(buf.next(P).bomb).toBe(true);
   });
 
+  it("ignores a redundant re-send of a still-queued seq (M2.15 redundancy)", () => {
+    const buf = new ServerInputBuffer();
+    buf.push(P, input(2, { fire: true }));
+    buf.push(P, input(3, { bomb: true }));
+    // The next datagram re-sends seq 2 for loss tolerance; it's already queued, so
+    // it must be dropped rather than processed twice.
+    buf.push(P, input(2, { thrust: true }));
+
+    expect(buf.depth(P)).toBe(2);
+    expect(buf.next(P).fire).toBe(true); // original seq 2, not the re-send
+    expect(buf.next(P).bomb).toBe(true);
+  });
+
   it("orders out-of-order arrivals by seq before consuming", () => {
     const buf = new ServerInputBuffer();
     buf.push(P, input(2, { fire: true }));

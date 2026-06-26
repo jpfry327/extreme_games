@@ -206,7 +206,11 @@ wss.on("connection", (ws) => {
       send(ws, { type: "welcome", playerId });
       console.info(`[+] ${msg.name} → ${playerId}  (${sessions.length} connected)`);
     } else if (msg.type === "input" && session) {
-      inputs.push(session.playerId, msg.input);
+      // M2.15: one datagram carries a batch (a frame's coalesced ticks plus
+      // redundant recent un-acked ones). Push each; the per-player queue dedups
+      // re-sends by seq (drops stale ≤ lastProcessedSeq and duplicates), so the
+      // redundancy that covers a dropped datagram is free here.
+      for (const input of msg.inputs) inputs.push(session.playerId, input);
       // M2.13: the client piggybacks the newest snapshot tick it has decoded;
       // record it as that client's delta baseline for the next broadcast.
       if (msg.ackSnapshotTick !== undefined) {

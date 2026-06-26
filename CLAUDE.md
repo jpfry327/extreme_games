@@ -83,7 +83,7 @@ the M2.11+ responsiveness/efficiency pass is underway. The sequence is:
 ```
 M0 ✓ → M1 ✓ → M2.0–M2.10 ✓ (full netcode model)
      → M2.11 ✓ (measure & tune) → M2.12 ✗ (UDP transport — SKIPPED) → M2.13 ✓ binary+delta
-     → M2.14 ✓ AOI culling (stealth deferred to M5) → M2.15 input batching → M3 (UI) → ...
+     → M2.14 ✓ AOI culling (stealth deferred to M5) → M2.15 ✓ input batching → M3 (UI) → ...
 ```
 
 M2.14 fills the per-client `serializeSnapshotFor` seam: each client is sent only entities within
@@ -156,6 +156,28 @@ to the identical shape, so the interpolator/predictor/renderer are untouched. Th
 - **Server CPU** — the old per-client `structuredClone` is gone: one shared snapshot is built
   from the live world and quantized **once** per broadcast (the next baseline), then encoded per
   client (O(players × clients) clone → one O(players) quantize).
+
+M2.15 batches the **upstream** input stream (the counterpart to M2.13/M2.14 downstream). The client
+no longer sends one framed message per 10ms tick (~100 msg/s); it coalesces a render frame's
+tick-commands into **one datagram** and re-sends the newest few un-acked inputs for redundancy.
+The seqs/stream are unchanged — only the wire packaging differs — so M2.3's fixed-tick model and
+M2.4's replay are untouched. Pieces:
+- **`InputMsg.inputs: SequencedInput[]`** — the wire message carries an array, not one command.
+  `Transport.sendInput` is now batch-shaped; loopback enqueues each immediately (zero latency),
+  the WebSocket sends one JSON frame per batch, and `SimulatedTransport` drops/jitters the
+  datagram **as a unit** (the loss the redundancy is designed to survive).
+- **`net/inputSender.ts`** (`InputSender`) — owns pacing + redundancy, kept out of the transports
+  so loopback stays immediate and the policy is unit-testable. Driven from `main.ts` off the
+  existing `ClientInputManager.unacked` ring: `produce()` still emits every tick, then the sender
+  flushes `unacked.slice(-INPUT.redundantTicks)` once per `INPUT.sendIntervalMs`. Tunables in
+  `config.INPUT` (`sendIntervalMs` default **16ms ≈ 60Hz ≈ per render frame**, `redundantTicks`
+  default 10). **60Hz is deliberate:** at one datagram per frame the uplink adds ~0 latency vs the
+  old per-tick send (inputs leave the same frame), while still cutting the message rate; ~30Hz is
+  a config-only bandwidth trade that adds up to an interval of uplink latency.
+- **Receive side is free** — `server/index.ts` loops `inputs.push` over `msg.inputs`; the existing
+  `PlayerQueue` dedup (drops stale ≤ `lastProcessedSeq` and already-queued duplicates) makes the
+  redundant overlap a no-op, so a dropped datagram is covered by the next with no round-trip /
+  repeat-last hiccup. The overlay gained an **upstream** line: `up …/s  batch …  redund …`.
 
 ## Key constraints
 

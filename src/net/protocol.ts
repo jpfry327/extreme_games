@@ -44,11 +44,20 @@ export interface SequencedInput {
   cmd: InputCommand;
 }
 
-/** A single sequenced command. Sent once per sim tick, immediately — coalesced
- *  render frames still emit every tick's command so the stream has no gaps. */
+/**
+ * A batch of sequenced commands (M2.15). The client coalesces a render frame's
+ * tick-commands into one datagram (~60Hz, not ~100Hz of individual frames) and
+ * includes the newest few **un-acked** inputs for redundancy, so a dropped
+ * datagram is covered by the next without a round-trip. `inputs` is ascending by
+ * `seq`; the server consumes them one-per-tick and dedups re-sends by `seq`
+ * (drops anything at/below the last processed seq, and duplicates already
+ * queued), so the redundant overlap is free on the receive side.
+ */
 export interface InputMsg {
   type: "input";
-  input: SequencedInput;
+  /** Ascending by `seq`: this frame's new tick-commands plus redundant recent
+   *  un-acked ones. The server processes the new ones and ignores the overlap. */
+  inputs: SequencedInput[];
   /** M2.13 — the newest snapshot tick the client has decoded, piggybacked on the
    *  input stream (client → server). The server delta-encodes the next snapshot
    *  against this acked baseline. Cumulative/monotonic: a lost input just delays

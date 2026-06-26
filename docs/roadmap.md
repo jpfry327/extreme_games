@@ -353,26 +353,44 @@ population. (Stealth server-enforcement lands when M5 fills the marked seam.)
 
 ---
 
-### M2.15 — Upstream input batching & loss tolerance
+### M2.15 — Upstream input batching & loss tolerance  ✓
 
 **Goal:** stop sending one framed message per 10ms tick (~100 msg/s/client). Batch
 and add redundancy so input survives loss without a retransmit — the upstream
 counterpart to the downstream work above.
 
 **Scope:**
-- [ ] Coalesce the tick-commands produced within a render frame into **one**
-      datagram; send at ~30–60Hz, not 100Hz of individual frames.
-- [ ] **Redundancy:** include the last few un-acked inputs in each message (cheap —
-      inputs are tiny), so a dropped datagram is covered by the next without a
-      round-trip. The server already dedups by `seq` (the buffer drops
-      stale/duplicate seqs).
-- [ ] Verify the M2.3 fixed-tick model and the M2.4 replay are unaffected (same
-      seqs, same order in, same poses out).
+- [x] Coalesce the tick-commands produced within a render frame into **one**
+      datagram. `InputMsg.input` → **`inputs: SequencedInput[]`**; `InputSender`
+      (`net/inputSender.ts`) paces the wire send to `INPUT.sendIntervalMs`
+      (default **~16ms ≈ 60Hz**, ≈ one datagram per render frame). The pacing
+      lives outside the transports (loopback stays immediate; policy is
+      unit-testable), driven from `main.ts` off the existing
+      `ClientInputManager.unacked` ring — `produce()` still emits every tick, so
+      the stream/seqs are unchanged. **Default chosen at 60Hz (not 30Hz)** so the
+      uplink adds ~0 latency vs the old per-tick send — inputs leave on the same
+      frame they do today, just coalesced — since the link is already latency-
+      sensitive; raising toward ~33ms (~30Hz) is a config-only bandwidth trade.
+- [x] **Redundancy:** each datagram re-includes the newest `INPUT.redundantTicks`
+      (default 10) un-acked inputs (just `unacked.slice(-N)` — inputs are tiny),
+      so a dropped datagram is covered by the next without a round-trip. The
+      server already dedups by `seq` (`PlayerQueue.push` drops stale ≤
+      `lastProcessedSeq` and duplicates already queued), so the overlap is free on
+      receive; `server/index.ts` just loops `inputs.push` over `msg.inputs`.
+- [x] Verified the M2.3 fixed-tick model and the M2.4 replay are unaffected:
+      production is unchanged (one seq per tick, same order), the determinism
+      integration suite stays green, and a unit test feeds producer→sender→server
+      and asserts a *wholly dropped* datagram reaches the **same final processed
+      seq** (redundancy carried the lost commands forward — no gap).
+- [x] Overlay (M2.11 "measurable build"): an **upstream** line shows datagram send
+      rate (`up …/s`, down from ~100), inputs per datagram (`batch …`), and the
+      redundancy depth (`redund …`).
 
 **Out of scope:** input compression beyond batching.
 
-**Playable end state:** a fraction of the upstream message rate, and a single lost
-input packet no longer causes a server-side gap / repeat-last hiccup.
+**Playable end state:** a fraction of the upstream message rate (~100→~60 msg/s,
+coalesced), and a single lost input packet no longer causes a server-side gap /
+repeat-last hiccup — covered by the in-datagram redundancy, no round-trip.
 
 ---
 
