@@ -221,20 +221,30 @@ export const NET = {
     enabled: true,
     /** Floor (ms): never tighter than ~2 broadcast gaps at 33Hz. */
     minMs: 50,
-    /** Ceiling (ms): cap the added lag; beyond this a link is just bad. Stays
-     *  within the lag-comp rewind budget so shots keep registering. */
-    maxMs: 200,
+    /** Ceiling (ms). 120 ≈ 4 broadcast gaps + a 60ms cushion. The old 200
+     *  existed to absorb burst-inflated "jitter" that the tick clock + p90
+     *  lateness no longer misread; real sustained lateness past 120ms is a
+     *  stall, which delay can't hide anyway (extrapolate/freeze handles it).
+     *  Budget: shooter comp ≈ RTT + this, so 120 + ~100ms RTT stays inside
+     *  `LAGCOMP.maxCompTicks` — and this ceiling directly bounds the victim's
+     *  "dodged but still died" rewind window, the fairness cost the old cap
+     *  amplified. */
+    maxMs: 120,
     /** Multiple of the mean snapshot interval to buffer (≥1 → always a newer
      *  sample to interpolate toward; 1.5 leaves half a gap of slack). */
     spacingFactor: 1.5,
     /** Multiple of the p90 snapshot lateness (vs the tick timeline — see
-     *  `NetHealth.latenessMs`) added as cushion above the spacing term. */
-    latenessFactor: 2,
+     *  `NetHealth.latenessMs`) added as cushion above the spacing term. p90 is
+     *  already near worst-case, so only a modest margin on top — ×2 of it
+     *  chronically over-delayed. */
+    latenessFactor: 1.25,
     /** Half-life (ms) for *raising* the delay — fast, to outrun a starving buffer. */
     raiseHalfLifeMs: 150,
-    /** Half-life (ms) for *lowering* it — slow, so transient jitter doesn't make
-     *  the delay itself jitter. */
-    lowerHalfLifeMs: 3000,
+    /** Half-life (ms) for *lowering* it. The p90-over-window lateness signal is
+     *  already stable (the old 3000 was double-smoothing on top of a spiky
+     *  EWMA), so recovery from a genuine spike can be twice as fast without the
+     *  delay itself time-warping remote ships. */
+    lowerHalfLifeMs: 1500,
   },
 
   /** Server-tick clock estimation (`net/tickClock.ts`) — the timebase that lets
@@ -332,17 +342,19 @@ export const LAGCOMP = {
    *  still got hit" unfairness the rewind imposes on the *victim* (the cost lag
    *  comp pays to make the shooter feel instant).
    *
-   *  25t = 250ms (top of the roadmap's 150–250ms band, and what CLAUDE.md
-   *  documents). M2.11 raised this from 15t (150ms) after the live ~100ms-RTT test:
-   *  the real *view* delay a shot must compensate is `interpDelayMs` (~75ms, now up
-   *  to `adaptiveInterp.maxMs` 200ms under jitter) **plus the full RTT**, i.e.
-   *  ~175ms at 100ms RTT — which the old 150ms cap clamped *below*, so connecting
-   *  shots were under-rewound and eaten ("bombs hit but don't register"). 250ms
-   *  covers interp + a ~150ms-RTT link with margin; players past that trade back to
-   *  some under-compensation rather than a larger victim-side dodge-then-die window.
-   *  Also implicitly capped by `historyTicks-1` (you can't rewind past what's
-   *  recorded; 120t = 1.2s leaves ample room). */
-  maxCompTicks: 25,
+   *  18t = 180ms. The real *view* delay a shot must compensate is the interp
+   *  delay **plus the full RTT**. With the tick-timeline clock the interp delay
+   *  settles at ~50–70ms on a clean ~70ms-RTT link (needed comp ≈ 120–140ms),
+   *  and its ceiling is now 120ms (`adaptiveInterp.maxMs`), so 18t covers a
+   *  100ms-RTT + 80ms-interp link exactly and the common case with margin.
+   *  History: M2.11 raised 15t→25t because the old arrival-time jitter estimate
+   *  pushed interp to 200ms and shots clamped ("bombs hit but don't register");
+   *  with that mismeasurement fixed, 250ms mostly bought a bigger victim-side
+   *  dodge-then-die window, so this steps back down in the victim's favour.
+   *  Guard rail: the overlay's `clamp N/s` line — if clamps show up at moderate
+   *  RTT in live tests, step toward 20–22t. Also implicitly capped by
+   *  `historyTicks-1` (you can't rewind past what's recorded). */
+  maxCompTicks: 18,
 } as const;
 
 // --- Area-of-interest culling (M2.14) ----------------------------------------
