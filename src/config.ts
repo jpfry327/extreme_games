@@ -236,6 +236,23 @@ export const NET = {
     lowerHalfLifeMs: 3000,
   },
 
+  /** Server-tick clock estimation (`net/tickClock.ts`) — the timebase that lets
+   *  interpolation run on the server's tick timeline instead of packet arrival
+   *  times (which TCP stalls turn into bursts). The windowed-min offset is
+   *  burst-immune (packets can only be *late*, never early); the applied offset
+   *  slews toward it at ≤`slewMaxMsPerSec` so the timeline never visibly steps,
+   *  and snaps only past `snapThresholdMs` (reconnect / tab-return). */
+  tickClock: {
+    /** Windowed-min horizon (ms) — a few fast deliveries always land inside. */
+    windowMs: 3000,
+    /** Rotating min-bucket width (ms): windowMs/bucketMs buckets, O(1)/snapshot. */
+    bucketMs: 500,
+    /** Max applied-offset slew (ms/s) → ≤2% time dilation, imperceptible. */
+    slewMaxMsPerSec: 20,
+    /** Raw-vs-applied gap beyond this (ms) snaps instead of slewing. */
+    snapThresholdMs: 250,
+  },
+
   /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
    *  leaves no sample newer than render time), remote entities are dead-reckoned
    *  forward from their last known velocity for at most this long, then frozen in
