@@ -6,7 +6,7 @@ const cfg: AdaptiveInterpConfig = {
   minMs: 50,
   maxMs: 200,
   spacingFactor: 1.5,
-  jitterFactor: 2,
+  latenessFactor: 2,
   raiseHalfLifeMs: 150,
   lowerHalfLifeMs: 3000,
 };

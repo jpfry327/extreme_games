@@ -1,16 +1,16 @@
 /**
- * Remote-projectile simulation audit — M2.8.
+ * Remote-projectile simulation audit — M2.8, updated for present-time rendering.
  *
- * M2.8 stops *interpolating* other players' bullets and instead simulates them
- * forward deterministically from the latest snapshot (the same determinism the
- * local ship (M2.4) and own shots (M2.6) rely on, turned outward). These tests
- * guard the two properties that buys us:
+ * Remote shots are simulated forward deterministically from the **newest**
+ * snapshot to the estimated server present (the same determinism the local ship
+ * (M2.4) and own shots (M2.6) rely on, turned outward). These tests guard:
  *
  *   1. A remote bullet simulated locally through a **wall bounce** reproduces the
  *      server's path bit-for-bit — this is what removes the bounce "teleport".
- *   2. A bullet the **server killed** between snapshots (e.g. a ship hit our
- *      map-only sim can't see) **retracts** via the newer-snapshot cross-check
- *      instead of flying on as a ghost.
+ *   2. A bullet the **server killed** is absent from the newest snapshot and so
+ *      simply stops being rendered — retraction is implicit in the base choice.
+ *   3. The forward window is clamped to `maxLeadMs`, so a stall freezes shots at
+ *      the cap instead of flying them unboundedly on stale state.
  *
  * Mirrors `net/determinism.test.ts`: the simulator is held to the *same*
  * `projectileSystem` the server runs, so equality is exact, not approximate.
@@ -27,6 +27,8 @@ import type { Snapshot } from "./snapshot";
 
 const LOCAL = "me";
 const REMOTE = "enemy";
+
+const TICK_MS = 1000 * TICK_DT;
 
 /** A 64×64-tile open map with a solid vertical wall one tile wide at tile x=20
  *  (world x 320..336), so a bullet flying +x into it bounces back. */
@@ -77,7 +79,7 @@ function groundTruth(map: GameMap, proj: Projectile, ticks: number): Projectile 
   return w.projectiles[0];
 }
 
-describe("remote-projectile simulation (M2.8)", () => {
+describe("remote-projectile simulation (present-time)", () => {
   it("reproduces a wall-bounce path bit-for-bit, no teleport", () => {
     const map = wallMap();
     // Heading +x straight at the wall at x=320, fast enough to reach and bounce.
@@ -86,19 +88,9 @@ describe("remote-projectile simulation (M2.8)", () => {
     const K = 60; // far enough that it has hit the wall and is travelling back
     const sim = new RemoteProjectileSimulator(map);
 
-    // Buffer: base at t0, plus a far-future snapshot so render time straddles the
-    // pair (a = base) and the bullet is still listed (so it's not retracted).
-    const t0 = 1000;
-    const interpDelayMs = 75;
-    const buffer = [
-      { snap: snapshot(0, [base]), receivedAt: t0 },
-      { snap: snapshot(999, [bullet({ id: 1 })]), receivedAt: t0 + 10_000 },
-    ];
-    // Render time = t0 + K ticks → simulate steps exactly K whole ticks (frac 0).
-    const renderTime = t0 + K * (1000 * TICK_DT);
-    const nowMs = renderTime + interpDelayMs;
-
-    const out = sim.simulate(buffer, nowMs, interpDelayMs, LOCAL, 100);
+    const buffer = [{ snap: snapshot(0, [base]), receivedAt: 1000 }];
+    // Present = K ticks past the base snapshot → exactly K whole steps (frac 0).
+    const out = sim.simulate(buffer, K * TICK_MS, LOCAL, 10_000);
     const truth = groundTruth(map, base, K);
 
     expect(out).toHaveLength(1);
@@ -116,32 +108,40 @@ describe("remote-projectile simulation (M2.8)", () => {
     expect(got.life).toBe(truth.life);
   });
 
-  it("retracts a server-killed bullet via the newer-snapshot cross-check", () => {
+  it("simulates from the NEWEST snapshot — a server-killed bullet stops rendering", () => {
     const map = wallMap();
-    // Two bullets flying in open space (no wall in their path), both alive in the
-    // base snapshot. The newer snapshot has lost #2 — the server killed it (a
-    // ship hit our map-only sim can't reproduce). It must not keep flying.
     const a1 = bullet({ id: 1, x: 50, y: 50, vx: 0, vy: 2 });
     const a2 = bullet({ id: 2, x: 60, y: 50, vx: 0, vy: 2 });
 
     const sim = new RemoteProjectileSimulator(map);
-    const t0 = 1000;
-    const interpDelayMs = 75;
     const buffer = [
-      { snap: snapshot(0, [a1, a2]), receivedAt: t0 },
-      // newer straddling snapshot: only #1 survives
-      { snap: snapshot(20, [bullet({ id: 1 })]), receivedAt: t0 + 10_000 },
+      { snap: snapshot(0, [a1, a2]), receivedAt: 1000 },
+      // Newest snapshot: the server killed #2 (a ship hit our map-only sim can't
+      // see); #1 carries its authoritative tick-20 pose.
+      { snap: snapshot(20, [groundTruth(map, a1, 20)]), receivedAt: 1200 },
     ];
-    const renderTime = t0 + 10 * (1000 * TICK_DT);
-    const nowMs = renderTime + interpDelayMs;
-
-    const out = sim.simulate(buffer, nowMs, interpDelayMs, LOCAL, 100);
+    // Present = tick 30 → 10 whole steps forward from the newest base.
+    const out = sim.simulate(buffer, 30 * TICK_MS, LOCAL, 10_000);
 
     expect(out.map((p) => p.id)).toEqual([1]);
-    // #1 reconciles to its simulated-forward pose without a pop (continuous path).
-    const truth = groundTruth(map, a1, 10);
+    // Stepping the newest base forward matches stepping the original from tick 0
+    // — determinism makes the snapshot hand-off seamless (no pop).
+    const truth = groundTruth(map, a1, 30);
     expect(out[0].x).toBe(truth.x);
     expect(out[0].y).toBe(truth.y);
+  });
+
+  it("clamps the forward window to maxLeadMs (stall freeze)", () => {
+    const map = wallMap();
+    const base = bullet({ id: 1, x: 50, y: 50, vx: 2, vy: 0 });
+    const sim = new RemoteProjectileSimulator(map);
+    const buffer = [{ snap: snapshot(0, [base]), receivedAt: 1000 }];
+
+    // Present says 100 ticks have passed, but the lead cap is 250ms = 25 ticks:
+    // the bullet freezes at its 25-tick pose instead of flying on stale state.
+    const out = sim.simulate(buffer, 100 * TICK_MS, LOCAL, 250);
+    const truth = groundTruth(map, base, 25);
+    expect(out[0].x).toBe(truth.x);
   });
 
   it("excludes the local player's own shots (those come from the Predictor)", () => {
@@ -150,12 +150,15 @@ describe("remote-projectile simulation (M2.8)", () => {
     const theirs = bullet({ id: 8, owner: REMOTE, x: 80, y: 50, vx: 1, vy: 0 });
 
     const sim = new RemoteProjectileSimulator(map);
-    const t0 = 1000;
-    const buffer = [
-      { snap: snapshot(0, [mine, theirs]), receivedAt: t0 },
-      { snap: snapshot(50, [bullet({ id: 7, owner: LOCAL }), bullet({ id: 8 })]), receivedAt: t0 + 10_000 },
-    ];
-    const out = sim.simulate(buffer, t0 + 100, 75, LOCAL, 100);
+    const buffer = [{ snap: snapshot(0, [mine, theirs]), receivedAt: 1000 }];
+    const out = sim.simulate(buffer, 100, LOCAL, 10_000);
     expect(out.map((p) => p.id)).toEqual([8]);
+  });
+
+  it("returns nothing before the clock exists (null present time)", () => {
+    const map = wallMap();
+    const sim = new RemoteProjectileSimulator(map);
+    const buffer = [{ snap: snapshot(0, [bullet({ id: 1 })]), receivedAt: 1000 }];
+    expect(sim.simulate(buffer, null, LOCAL, 10_000)).toEqual([]);
   });
 });

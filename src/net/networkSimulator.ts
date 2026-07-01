@@ -38,6 +38,15 @@ export interface NetSimParams {
   jitterMs: number;
   /** Per-packet drop chance, percent (0–100), applied to each direction. */
   lossPct: number;
+  /** TCP-stall simulation: every `stallEveryMs`, hold *all* frames for `stallMs`
+   *  and then deliver them together in order — the head-of-line-blocking
+   *  signature of a WebSocket riding a TCP retransmit or a buffering proxy
+   *  (the Railway failure mode). 0 for either = off. Unlike `lossPct`, nothing
+   *  is dropped and nothing is reordered: TCP delivers everything, just late
+   *  and in a burst. */
+  stallMs: number;
+  /** Stall period, ms (a `stallMs` hold begins at each multiple). 0 = off. */
+  stallEveryMs: number;
 }
 
 export class SimulatedTransport implements Transport {
@@ -46,6 +55,16 @@ export class SimulatedTransport implements Transport {
   readonly params: NetSimParams;
 
   private clientHandler: SnapshotHandler | null = null;
+
+  /** Phase anchor for the stall windows, so "every N ms" is stable regardless of
+   *  when packets happen to be scheduled. */
+  private readonly stallAnchorMs = Date.now();
+  /** Absolute delivery time of the last packet scheduled while stall mode is
+   *  active — enforces FIFO with whole-ms spacing. Browsers coerce a setTimeout
+   *  delay to an integer (long), so sub-ms sequencing is truncated away and a
+   *  burst's delivery order would inherit each packet's fractional schedule
+   *  time, i.e. scramble — and TCP never reorders. */
+  private lastStallTargetMs = 0;
 
   constructor(
     private readonly inner: Transport,
@@ -93,6 +112,23 @@ export class SimulatedTransport implements Transport {
     if (Math.random() * 100 < this.params.lossPct) return; // dropped on the wire
     const jitter = (Math.random() * 2 - 1) * this.params.jitterMs;
     const delay = Math.max(0, this.params.latencyMs + jitter);
-    setTimeout(deliver, delay);
+    setTimeout(deliver, this.stalledDelay(delay));
+  }
+
+  /** If the packet's normal delivery time lands inside a stall window, push it
+   *  to the window's end; otherwise leave it untouched. Either way, never let
+   *  it deliver before an earlier-scheduled packet (whole-ms FIFO clamp — see
+   *  `lastStallTargetMs`), so a released burst drains in order. */
+  private stalledDelay(delayMs: number): number {
+    const { stallMs, stallEveryMs } = this.params;
+    if (stallMs <= 0 || stallEveryMs <= 0) return delayMs;
+    const now = Date.now();
+    const arrival = now + delayMs;
+    const sinceAnchor = arrival - this.stallAnchorMs;
+    const windowStart = this.stallAnchorMs + Math.floor(sinceAnchor / stallEveryMs) * stallEveryMs;
+    let target = arrival < windowStart + stallMs ? windowStart + stallMs : arrival;
+    target = Math.max(target, this.lastStallTargetMs + 1);
+    this.lastStallTargetMs = target;
+    return target - now;
   }
 }

@@ -7,8 +7,14 @@
  * interpolating between the two buffered snapshots that straddle that render time
  * (the canonical Source-engine approach — architecture §5.2, roadmap M2.2).
  *
- * The timeline is built from **client receive-time** (`performance.now()`), not
- * the server tick, so no clock-sync is needed.
+ * The timeline is the **server tick timeline** (`tick × 10ms`), mapped onto the
+ * client clock by `ServerClock` (`tickClock.ts`). Through M2.15 it was built
+ * from packet *arrival* times instead — no clock-sync needed — but arrival
+ * spacing only reflects sim spacing on a clean link. Over deployed WSS (TCP), a
+ * retransmit or a buffering proxy delivers snapshots in bursts, which warped
+ * remote ships and destabilized the lag-comp `renderTick` stamp. On the tick
+ * timeline, burst arrival changes *when* a snapshot lands in the buffer but
+ * never *where* it sits on the timeline.
  *
  * `buildView` bakes the interpolated pose into a *view* `World` whose `prev*`
  * fields equal `current`, so the existing renderer (which lerps `prev*→current`
@@ -27,15 +33,20 @@
  * sources are stitched into `view.projectiles` by main.ts after `buildView`.
  */
 
-import { TICK_DT } from "../config";
+import { NET, TICK_DT } from "../config";
 import type { Kinematics, Player, PlayerId } from "../sim/types";
 import type { World } from "../sim/world";
 import type { Snapshot } from "./snapshot";
+import { ServerClock } from "./tickClock";
+
+/** One sim tick in ms — the unit of the interpolation timeline. */
+export const TICK_MS = 1000 * TICK_DT;
 
 /** A snapshot tagged with the local time it arrived. */
 export interface BufferedSnapshot {
   snap: Snapshot;
-  /** `performance.now()` ms at receipt — the interpolation timeline. */
+  /** `performance.now()` ms at receipt — feeds the tick-clock estimate; the
+   *  interpolation timeline itself is `snap.tick × TICK_MS`. */
   receivedAt: number;
 }
 
@@ -59,14 +70,18 @@ export interface StraddlePair {
 
 /**
  * Pick the buffered snapshot pair straddling `renderTime` (the canonical
- * Source-engine interpolation window). Returns `null` only for an empty buffer.
+ * Source-engine interpolation window). `renderTime` is on the **tick timeline**
+ * (ms, comparable to `snap.tick × TICK_MS`) — see `SnapshotInterpolator
+ * .renderTimeMs`. Returns `null` only for an empty buffer.
  *
  *   - Before the oldest sample (buffer warming up): clamp to the oldest, `t=0`.
  *   - At/after the newest sample (lag spike / dropped run): clamp to the newest
  *     and report an `extrapMs` window (capped at `extrapolateMaxMs`) so callers
  *     can dead-reckon forward then freeze, rather than snapping.
- *   - Otherwise: the two samples `[a, b]` with `a.receivedAt ≤ renderTime ≤
- *     b.receivedAt`, and `t` the position between them.
+ *   - Otherwise: the two samples `[a, b]` whose ticks bracket `renderTime`, and
+ *     `t` the position between them. Spans are exact multiples of TICK_MS, so a
+ *     burst of late-arriving snapshots can't distort `t` — they land on the
+ *     timeline where their ticks say, not where the wire delivered them.
  */
 export function pickStraddlingPair(
   buffer: readonly BufferedSnapshot[],
@@ -75,28 +90,29 @@ export function pickStraddlingPair(
 ): StraddlePair | null {
   if (buffer.length === 0) return null;
   const newest = buffer[buffer.length - 1];
+  const tickTime = (buf: BufferedSnapshot) => buf.snap.tick * TICK_MS;
 
-  if (renderTime <= buffer[0].receivedAt) {
+  if (renderTime <= tickTime(buffer[0])) {
     // Before our oldest sample (buffer warming up) — clamp to the oldest pose.
     return { a: buffer[0], b: buffer[0], t: 0, extrapMs: 0 };
   }
-  if (renderTime >= newest.receivedAt) {
+  if (renderTime >= tickTime(newest)) {
     // Caught up to (or past) the newest sample — report a bounded extrapolation
     // window from it. The roadmap's buffer-starvation fallback.
     return {
       a: newest,
       b: newest,
       t: 0,
-      extrapMs: Math.min(renderTime - newest.receivedAt, extrapolateMaxMs),
+      extrapMs: Math.min(renderTime - tickTime(newest), extrapolateMaxMs),
     };
   }
   // Advance until renderTime falls inside [buffer[i], buffer[i+1]].
   let i = 0;
-  while (i < buffer.length - 1 && buffer[i + 1].receivedAt < renderTime) i++;
+  while (i < buffer.length - 1 && tickTime(buffer[i + 1]) < renderTime) i++;
   const a = buffer[i];
   const b = buffer[i + 1];
-  const span = b.receivedAt - a.receivedAt;
-  const t = span > 0 ? (renderTime - a.receivedAt) / span : 0;
+  const span = tickTime(b) - tickTime(a);
+  const t = span > 0 ? (renderTime - tickTime(a)) / span : 0;
   return { a, b, t, extrapMs: 0 };
 }
 
@@ -121,14 +137,51 @@ function lerpAngle(a: number, b: number, t: number): number {
 
 export class SnapshotInterpolator {
   private buffer: BufferedSnapshot[] = [];
-  /** `receivedAt` of the newest snapshot whose events have already been released.
+  /** Tick of the newest snapshot whose events have already been released.
    *  Events fire once, in interpolated time, when render time passes them. */
-  private lastEventTime = -Infinity;
+  private lastEventTick = -Infinity;
+  /** Tick of the newest snapshot whose *prompt* events (bombExploded) have been
+   *  released. Remote projectiles render at the estimated server present, so
+   *  their detonations must not wait for the past-timeline render time — a
+   *  bullet would vanish at the wall and its boom draw ~interpDelay later. */
+  private lastPromptEventTick = -Infinity;
+  /** Maps the client clock onto the server tick timeline; fed by every push. */
+  private readonly clock = new ServerClock(NET.tickClock, TICK_MS);
+  /** Monotonic floor for `renderTick` — a clock snap (reconnect / tab-return)
+   *  must never stamp a *smaller* lag-comp rewind target than already sent. */
+  private lastRenderTick = -Infinity;
 
-  /** Buffer a freshly received snapshot. `nowMs` is `performance.now()`. */
+  /** Buffer a freshly received snapshot. `nowMs` is `performance.now()`.
+   *  Callers must drop stale (out-of-order) ticks before pushing — main.ts
+   *  does — so the buffer and the clock only ever see monotone ticks. */
   push(snap: Snapshot, nowMs: number): void {
     this.buffer.push({ snap, receivedAt: nowMs });
     if (this.buffer.length > MAX_BUFFER) this.buffer.shift();
+    this.clock.observe(snap.tick, nowMs);
+  }
+
+  /** Estimated server sim time (ms on the tick timeline) at client time
+   *  `nowMs`. Null before the first snapshot. */
+  serverNowMs(nowMs: number): number | null {
+    return this.clock.serverTimeMs(nowMs);
+  }
+
+  /** The tick-timeline render time for remote entities: estimated server now,
+   *  rewound by the interpolation delay. Null before the first snapshot. */
+  renderTimeMs(nowMs: number, interpDelayMs: number): number | null {
+    const serverNow = this.clock.serverTimeMs(nowMs);
+    return serverNow === null ? null : serverNow - interpDelayMs;
+  }
+
+  /** How late the newest snapshot arrived vs the fastest-path timeline (ms) —
+   *  the burst/stall signal `NetHealth` feeds to the adaptive interp delay. */
+  get lastLatenessMs(): number {
+    return this.clock.lastLatenessMs;
+  }
+
+  /** Raw windowed-min clock offset (ms) — debug overlay only. */
+  get clockOffsetMs(): number | null {
+    return this.clock.rawOffsetMs;
   }
 
   /** The buffered snapshots (read-only). The `RemoteProjectileSimulator` (M2.8)
@@ -139,30 +192,39 @@ export class SnapshotInterpolator {
   }
 
   /**
-   * The server tick the local view corresponds to at render time `nowMs −
-   * interpDelayMs` — the rewind target for server-side lag compensation (M2.9).
-   * The firer is always looking at remote ships interpolated between the
-   * straddling snapshot pair, so the tick it's effectively aiming through is those
-   * two snapshots' ticks blended by the same `t` the poses use, rounded to a whole
+   * The server tick the local view corresponds to at the tick-timeline render
+   * time — the rewind target for server-side lag compensation (M2.9). The firer
+   * is always looking at remote ships interpolated between the straddling
+   * snapshot pair, so the tick it's effectively aiming through is those two
+   * snapshots' ticks blended by the same `t` the poses use, rounded to a whole
    * tick (the server's history is keyed by integer ticks). Stamped onto each
    * outgoing input so the server can rewind targets to exactly this view.
+   *
+   * On the tick timeline this advances continuously (~1 tick per 10ms) instead
+   * of swinging with packet arrival, so the server's `compTicks` stays stable.
+   * A monotonic floor guards the one discontinuity left — a clock snap — from
+   * ever stamping a smaller (earlier) view than a previous input carried.
    *
    * Returns `null` before any snapshot has arrived (no view yet → no
    * compensation). During buffer starvation the pair clamps to the newest sample,
    * so this returns the newest tick — i.e. less rewind, never more.
    */
   renderTick(nowMs: number, interpDelayMs: number, extrapolateMaxMs: number): number | null {
-    const renderTime = nowMs - interpDelayMs;
+    const renderTime = this.renderTimeMs(nowMs, interpDelayMs);
+    if (renderTime === null) return null;
     const pair = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs);
     if (!pair) return null;
     const { a, b, t } = pair;
-    return Math.round(a.snap.tick + (b.snap.tick - a.snap.tick) * t);
+    const tick = Math.round(a.snap.tick + (b.snap.tick - a.snap.tick) * t);
+    this.lastRenderTick = Math.max(this.lastRenderTick, tick);
+    return this.lastRenderTick;
   }
 
   /**
-   * Populate `view` with the interpolated world for render time `nowMs −
-   * interpDelayMs`. Remote *players* are lerped between the straddling snapshot
-   * pair; the local player is pinned to the newest snapshot. Projectiles are left
+   * Populate `view` with the interpolated world for the tick-timeline render
+   * time (estimated server now − `interpDelayMs`). Remote *players* are lerped
+   * between the straddling snapshot pair; the local player is pinned to the
+   * newest snapshot. Projectiles are left
    * empty here — main.ts fills them from the Predictor + RemoteProjectileSimulator
    * (M2.8). Released events (in interpolated time) are written to `view.events`.
    *
@@ -180,7 +242,8 @@ export class SnapshotInterpolator {
     if (this.buffer.length === 0) return;
 
     const newest = this.buffer[this.buffer.length - 1];
-    const renderTime = nowMs - interpDelayMs;
+    // Non-null: a non-empty buffer means the clock has observed a snapshot.
+    const renderTime = this.renderTimeMs(nowMs, interpDelayMs)!;
 
     // Pick the straddling snapshot pair a (older) .. b (newer). Shared with the
     // remote-projectile simulator (M2.8) so ships and bullets agree on the window.
@@ -211,17 +274,32 @@ export class SnapshotInterpolator {
     // start from an empty list each frame.
     view.projectiles.length = 0;
 
-    // --- events: release each snapshot's events once, in interpolated time ---
-    // The watermark is a strict `>`: two snapshots sharing an identical
-    // receivedAt (same performance.now() tick) would drop the second's events,
-    // but at ~33Hz that collision effectively never happens.
+    // --- events: release each snapshot's events once ------------------------
+    // Watermarked by server tick, so a burst of snapshots arriving together
+    // (which share one receivedAt — the ambiguity the old arrival-time watermark
+    // had) still release strictly once each. Release time splits by what the
+    // event anchors to:
+    //   - ship-anchored events (shipHit / shipDied / playerSpawned) wait for the
+    //     interpolated render time to pass their tick — ships are drawn in the
+    //     past, so their effects must be too;
+    //   - bombExploded releases immediately on arrival — remote projectiles are
+    //     drawn at the estimated server *present*, so a detonation held back by
+    //     ~interpDelay would fire long after its bullet visually vanished.
     view.events.length = 0;
     for (const buf of this.buffer) {
-      if (buf.receivedAt > this.lastEventTime && buf.receivedAt <= renderTime) {
-        for (const e of buf.snap.events) view.events.push(e);
-        this.lastEventTime = buf.receivedAt;
+      if (buf.snap.tick > this.lastPromptEventTick) {
+        for (const e of buf.snap.events) {
+          if (e.type === "bombExploded") view.events.push(e);
+        }
+      }
+      if (buf.snap.tick > this.lastEventTick && buf.snap.tick * TICK_MS <= renderTime) {
+        for (const e of buf.snap.events) {
+          if (e.type !== "bombExploded") view.events.push(e);
+        }
+        this.lastEventTick = buf.snap.tick;
       }
     }
+    this.lastPromptEventTick = newest.snap.tick;
   }
 }
 

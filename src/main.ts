@@ -16,6 +16,7 @@ import { ReconciliationSmoother } from "./net/reconciliationSmoother";
 import { NetHealth } from "./net/netHealth";
 import { AdaptiveInterpDelay } from "./net/adaptiveInterp";
 import { PredictedHitDetector } from "./net/predictedHits";
+import { IncomingHitDetector } from "./net/incomingHits";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
 // above for these two and uncomment the loopback block below:
@@ -63,6 +64,11 @@ async function main() {
   // our predicted shots overlaps an enemy as drawn, instead of a round-trip later.
   // Damage/kills stay server-authoritative.
   const hitDetector = new PredictedHitDetector();
+  // Defender-side mirror of the above: the instant an enemy shot (drawn at the
+  // estimated server present) overlaps our predicted ship, flash the hit NOW
+  // instead of ~interpDelay + RTT/2 later. Cosmetic only — damage stays
+  // server-authoritative; the authoritative shipHit twin is deduped below.
+  const incomingHits = new IncomingHitDetector();
   // M2.11: network-health telemetry (jitter, snapshot loss/stalls, buffer depth,
   // extrapolation/freeze + comp-clamp rates) for the debug overlay, and the
   // interval/jitter feed for the adaptive interpolation delay below.
@@ -109,6 +115,14 @@ async function main() {
   // normally lands first. On a genuine false positive the shot pops back after this
   // — rare, since the server lag-comp-rewinds the enemy to ~the pose we drew.
   const SHOT_SUPPRESS_TTL_MS = 400;
+  // Incoming hits we've already flashed from the detector (instant), so the
+  // authoritative shipHit twin arriving ~interpDelay + RTT/2 later is suppressed
+  // instead of flashing twice. Matched by attacker only — the server reports the
+  // hit at the *rewound* pose, which under lag comp can sit tens of px from where
+  // we drew the flash, so a position match would leak doubles. Consumed 1:1; a
+  // fatal shipHit is never suppressed (the killing blow draws authoritatively).
+  const shownIncomingHits: { by: string; expiresMs: number }[] = [];
+  const INCOMING_HIT_TTL_MS = 400;
 
   // 3. Input + renderer — initialize NOW so the canvas is on screen while we
   //    connect. The game loop starts immediately in "connecting…" mode.
@@ -168,8 +182,8 @@ async function main() {
     newestSnapTick = snap.tick;
 
     const now = performance.now();
-    health.onSnapshot(snap.tick, now); // M2.11: jitter + tick-gap loss tracking
-    interp.push(snap, now);
+    interp.push(snap, now); // feeds the tick clock — push before reading lateness
+    health.onSnapshot(snap.tick, now, interp.lastLatenessMs); // lateness + tick-gap loss
     // M2.4 reconciliation: measure prediction error *before* the ack drops the
     // un-acked inputs (so this frame's replay still recorded the acked seq).
     const local = snap.players.find((p) => p.id === view.localPlayerId);
@@ -250,6 +264,29 @@ async function main() {
     events.length = w;
   }
 
+  // Drop the authoritative copy of any incoming hit we already flashed from the
+  // detector, mirroring suppressShownLocalBooms above. Runs before the renderer
+  // drains events.
+  function suppressShownIncomingHits(world: World, nowMs: number): void {
+    for (let i = shownIncomingHits.length - 1; i >= 0; i--) {
+      if (shownIncomingHits[i].expiresMs <= nowMs) shownIncomingHits.splice(i, 1);
+    }
+    const events = world.events;
+    let w = 0;
+    for (let r = 0; r < events.length; r++) {
+      const e = events[r];
+      if (e.type === "shipHit" && e.target === world.localPlayerId && !e.fatal) {
+        const mi = shownIncomingHits.findIndex((h) => h.by === e.by);
+        if (mi !== -1) {
+          shownIncomingHits.splice(mi, 1);
+          continue; // suppress: we already flashed this one
+        }
+      }
+      events[w++] = e;
+    }
+    events.length = w;
+  }
+
   function frame(now: number) {
     const dt = (now - last) / 1000;
     last = now;
@@ -265,11 +302,11 @@ async function main() {
     }
 
     // M2.11: ease the interpolation delay toward the measured link (snapshot
-    // spacing + jitter), then use this single value everywhere this frame
-    // (renderTick stamping, buildView, remote projectiles) so ships and bullets
-    // stay on one timeline. Falls back to the fixed NET.interpDelayMs when adaptive
-    // is off or before any snapshot timing exists.
-    adaptiveInterp.update(health.meanIntervalMs, health.jitterMs, dt);
+    // spacing + p90 lateness vs the tick timeline), then use this single value
+    // everywhere this frame (renderTick stamping, buildView, remote projectiles)
+    // so ships and bullets stay on one timeline. Falls back to the fixed
+    // NET.interpDelayMs when adaptive is off or before any snapshot timing exists.
+    adaptiveInterp.update(health.meanIntervalMs, health.latenessMs, dt);
     const interpMs = adaptiveInterp.ms;
 
     // Produce one stamped command per elapsed sim tick (not per render frame)
@@ -304,6 +341,10 @@ async function main() {
     // Ship-hit detonations (which prediction can't reproduce — the predicted world
     // has no remote ships) won't match a shown boom, so they still draw.
     suppressShownLocalBooms(view, now);
+    // Same for the authoritative copy of incoming hits we already flashed. Runs
+    // before this frame's cosmetic pushes (below), so an entry added this frame
+    // can only ever consume the *authoritative* twin, never its own flash.
+    suppressShownIncomingHits(view, now);
 
     // M2.4: replace the laggy snapshot-pinned local player with the predicted
     // one (reset to the last ack + replay of un-acked inputs). The camera and
@@ -380,18 +421,42 @@ async function main() {
       }
     }
 
-    // M2.8: everyone else's shots come from the deterministic simulator (forward
-    // from the latest snapshot to the ships' render time) instead of being lerped.
-    // Bounces trace the real path; server-killed bullets retract via b-snapshot
-    // cross-check. Appended alongside the predicted own-shots above.
+    // Everyone else's shots come from the deterministic simulator, forward from
+    // the newest snapshot to the estimated server *present* — the honest place to
+    // draw a threat, since that's where the server adjudicates it (see
+    // remoteProjectiles.ts). Bounces trace the real path; a server-killed bullet
+    // is simply absent from the newest snapshot. Appended alongside the predicted
+    // own-shots above.
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
-      now,
-      interpMs,
+      interp.serverNowMs(now),
       view.localPlayerId,
-      NET.extrapolateMaxMs,
+      NET.remotePresent.maxLeadMs,
     );
-    for (const p of remoteShots) view.projectiles.push(p);
+    // Incoming-hit feedback: the instant an enemy shot reaches our predicted
+    // ship, flash the hit, stop drawing the shot (it ends here, like own-shot
+    // hits do), and remember it so the authoritative twin is deduped
+    // (suppressShownIncomingHits above). Damage stays server-authoritative.
+    const meDrawn = view.players.get(view.localPlayerId) ?? null;
+    for (const hit of incomingHits.detect(remoteShots, meDrawn)) {
+      suppressedShotIds.set(hit.projectileId, now + SHOT_SUPPRESS_TTL_MS);
+      shownIncomingHits.push({ by: hit.by, expiresMs: now + INCOMING_HIT_TTL_MS });
+      view.events.push({
+        type: "shipHit",
+        by: hit.by,
+        target: view.localPlayerId,
+        x: hit.x,
+        y: hit.y,
+        damage: 0,
+        fatal: false,
+        rewound: false,
+      });
+    }
+    for (const p of remoteShots) {
+      const suppressedUntil = suppressedShotIds.get(p.id);
+      if (suppressedUntil !== undefined && suppressedUntil > now) continue; // ended at our ship
+      view.projectiles.push(p);
+    }
 
     renderer.draw(view, 1, dt, latestPings);
 
@@ -452,7 +517,11 @@ async function main() {
 
     // Record this frame's health gauges (buffer/extrapolation from the same straddle
     // the interpolator used) and roll up the per-second rates shown below.
-    const straddle = pickStraddlingPair(interp.snapshots, now - interpMs, NET.extrapolateMaxMs);
+    const straddle = pickStraddlingPair(
+      interp.snapshots,
+      interp.renderTimeMs(now, interpMs) ?? 0,
+      NET.extrapolateMaxMs,
+    );
     const extrapMs = straddle?.extrapMs ?? 0;
     health.onFrame(dt, {
       bufferDepth: interp.snapshots.length,
@@ -471,7 +540,8 @@ async function main() {
     netdebug.textContent =
       `── netcode (M2.11) ──\n` +
       `ping ${ping}ms  ack ${inputMgr.rttMs.toFixed(0)}ms\n` +
-      `jitter ±${health.jitterMs.toFixed(0)}ms  in-buf ${serverInputDepth}\n` +
+      `late p90 ${health.latenessMs.toFixed(0)}ms  jitter ±${health.jitterMs.toFixed(0)}ms  in-buf ${serverInputDepth}\n` +
+      `srvclk off ${interp.clockOffsetMs?.toFixed(0) ?? "—"}ms\n` +
       // M2.15 upstream: datagram send rate (down from ~100/s), inputs per datagram,
       // and the redundancy depth that lets a dropped one recover without a round-trip.
       `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}\n` +
@@ -540,8 +610,10 @@ function setupNetSimPanel(transport: SimulatedTransport): void {
   const latency = $<HTMLInputElement>("ns-latency");
   const jitter = $<HTMLInputElement>("ns-jitter");
   const loss = $<HTMLInputElement>("ns-loss");
+  const stall = $<HTMLInputElement>("ns-stall");
+  const stallEvery = $<HTMLInputElement>("ns-stall-every");
   // Bail quietly if the panel isn't in the DOM (keeps the client robust).
-  if (!enabled || !latency || !jitter || !loss) return;
+  if (!enabled || !latency || !jitter || !loss || !stall || !stallEvery) return;
 
   const p = transport.params;
   const sync = () => {
@@ -549,9 +621,13 @@ function setupNetSimPanel(transport: SimulatedTransport): void {
     latency.value = String(p.latencyMs);
     jitter.value = String(p.jitterMs);
     loss.value = String(p.lossPct);
+    stall.value = String(p.stallMs);
+    stallEvery.value = String(p.stallEveryMs);
     $("ns-latency-val").textContent = `${p.latencyMs}ms`;
     $("ns-jitter-val").textContent = `±${p.jitterMs}ms`;
     $("ns-loss-val").textContent = `${p.lossPct}%`;
+    $("ns-stall-val").textContent = `${p.stallMs}ms`;
+    $("ns-stall-every-val").textContent = p.stallEveryMs > 0 ? `/${p.stallEveryMs}ms` : "off";
   };
 
   enabled.addEventListener("change", () => {
@@ -568,6 +644,14 @@ function setupNetSimPanel(transport: SimulatedTransport): void {
   });
   loss.addEventListener("input", () => {
     p.lossPct = Number(loss.value);
+    sync();
+  });
+  stall.addEventListener("input", () => {
+    p.stallMs = Number(stall.value);
+    sync();
+  });
+  stallEvery.addEventListener("input", () => {
+    p.stallEveryMs = Number(stallEvery.value);
     sync();
   });
   sync();

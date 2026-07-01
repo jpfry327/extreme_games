@@ -35,8 +35,12 @@ import { loadMapSync } from "./loadMap";
 // Railway (and most PaaS hosts) inject the port to bind via process.env.PORT;
 // fall back to 3000 so `npm run server` keeps working locally with no env set.
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
-/** Broadcast a snapshot every N sim ticks: 100 / 3 ≈ 33 Hz. */
-const BROADCAST_EVERY = 3;
+/** Broadcast a snapshot every N sim ticks: 100 / 2 = 50 Hz. Raised from every-3
+ *  (~33Hz) with the tick-timeline pass: tighter spacing lowers the adaptive
+ *  interp-delay floor (spacing×1.5 → 30ms) and halves the renderTick sampling
+ *  error feeding lag comp. Deltas are field-level + AOI-culled, so the extra
+ *  frames are cheap; revert to 3 if Railway CPU/egress says otherwise. */
+const BROADCAST_EVERY = 2;
 /** Measure each socket's round-trip time this often (ms) via WS ping/pong. */
 const PING_EVERY_MS = 1000;
 
@@ -89,6 +93,9 @@ interface Session {
   pingSentAt: number;
   /** Messages received from this socket in the current rate-limit window. */
   msgsThisSec: number;
+  /** Broadcasts skipped because this socket's TCP send buffer was backed up
+   *  (see MAX_BUFFERED_BYTES). Logged and reset by the 1Hz timer. */
+  skippedBroadcasts: number;
 }
 const sessions: Session[] = [];
 let nextId = 1;
@@ -123,6 +130,18 @@ function buildSharedSnapshot(pings: Record<PlayerId, number>): Snapshot {
   };
 }
 
+/** Skip a client's broadcast once its socket has this much unsent data queued.
+ *  A stalled TCP path (retransmit, proxy buffering) otherwise queues every
+ *  broadcast in order and delivers them as one burst of *stale* snapshots when
+ *  it recovers — the exact head-of-line pattern the client's tick clock has to
+ *  ride out. Typical encoded frames are ~0.1–1KB, so 8KB ≈ a quarter-second of
+ *  snapshots: past that, dropping broadcasts bounds the recovery burst to what
+ *  interpolation + extrapolation absorb. Skipping is safe for the delta channel
+ *  — deltas ride only *acked* baselines, and an unsent frame simply never
+ *  becomes one; if the ack ages out entirely, encodeFor recovers with a
+ *  keyframe. */
+const MAX_BUFFERED_BYTES = 8 * 1024;
+
 function broadcast(): void {
   const pings = pingMap();
   // One quantize per broadcast (fresh, f32-rounded objects), shared by every
@@ -132,6 +151,12 @@ function broadcast(): void {
   const quantized = quantizeSnapshot(buildSharedSnapshot(pings));
   for (const s of sessions) {
     if (s.ws.readyState !== WebSocket.OPEN) continue;
+    // Backpressure guard — checked *before* encodeFor, which has side effects
+    // (baseline ring push, keyframe counter) that must track sent frames only.
+    if (s.ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+      s.skippedBroadcasts++;
+      continue;
+    }
     const bytes = snapshots.encodeFor(
       s.playerId,
       quantized,
@@ -201,7 +226,15 @@ wss.on("connection", (ws) => {
       // Server owns spawn assignment — addPlayer runs findSpawn server-side; the
       // client never picks a position (M2.7).
       world.addPlayer(playerId, msg.name, 0, WARBIRD);
-      session = { ws, playerId, name: msg.name, rttMs: 0, pingSentAt: 0, msgsThisSec: 0 };
+      session = {
+        ws,
+        playerId,
+        name: msg.name,
+        rttMs: 0,
+        pingSentAt: 0,
+        msgsThisSec: 0,
+        skippedBroadcasts: 0,
+      };
       sessions.push(session);
       send(ws, { type: "welcome", playerId });
       console.info(`[+] ${msg.name} → ${playerId}  (${sessions.length} connected)`);
@@ -248,6 +281,12 @@ wss.on("connection", (ws) => {
 setInterval(() => {
   for (const s of sessions) {
     s.msgsThisSec = 0;
+    if (s.skippedBroadcasts > 0) {
+      console.info(
+        `[server] ${s.name} (${s.playerId}): skipped ${s.skippedBroadcasts} broadcasts (TCP backpressure)`,
+      );
+      s.skippedBroadcasts = 0;
+    }
     if (s.ws.readyState === WebSocket.OPEN) {
       s.pingSentAt = performance.now();
       s.ws.ping();
@@ -258,7 +297,7 @@ setInterval(() => {
 // ---------- tick loop ---------------------------------------------------------
 
 let last = performance.now();
-let ticksSinceBroadcast = 0;
+let lastBroadcastTick = 0;
 
 // Build the per-tick step context: pull one buffered command per human player
 // (repeating their last on a gap), and compute the bot from the current world —
@@ -280,8 +319,11 @@ setInterval(() => {
 
   loop.advance(dt, buildCtx);
 
-  ticksSinceBroadcast++;
-  if (ticksSinceBroadcast >= BROADCAST_EVERY) {
+  // Pace broadcasts by *sim ticks actually run*, not timer fires: a lagging
+  // event loop makes one fire cover several ticks, and counting fires stretched
+  // the broadcast gap to 3–4 ticks — which clients (correctly) read as
+  // irregular spacing and inferred as snapshot loss.
+  if (world.tick - lastBroadcastTick >= BROADCAST_EVERY) {
     // Drain events on *broadcast*, not on *tick*. The sim runs at 100Hz but we
     // only broadcast at ~33Hz; clearing every tick (the old bug) wiped events
     // produced on the 4 in-between ticks before any snapshot could carry them,
@@ -292,6 +334,6 @@ setInterval(() => {
     // broadcast.
     broadcast();
     world.events.length = 0;
-    ticksSinceBroadcast = 0;
+    lastBroadcastTick = world.tick;
   }
 }, Math.round(TICK_DT * 1000));

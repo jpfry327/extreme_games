@@ -207,11 +207,11 @@ export const NET = {
 
   /** Adaptive interpolation delay (M2.11). Instead of a fixed `interpDelayMs`, the
    *  client raises/lowers the delay to track the link: enough buffer to always have
-   *  a straddling snapshot pair (≈ spacing) plus a jitter cushion, so a jittery
+   *  a straddling snapshot pair (≈ spacing) plus a lateness cushion, so a jittery
    *  connection stops starving the buffer (the "remote ships jump" symptom) without
    *  permanently over-delaying a clean one.
    *
-   *    target = clamp(meanIntervalMs * spacingFactor + jitterMs * jitterFactor,
+   *    target = clamp(meanIntervalMs * spacingFactor + latenessMs * latenessFactor,
    *                   minMs, maxMs)
    *
    *  The live value eases toward `target` with an asymmetric half-life — raise fast
@@ -221,19 +221,60 @@ export const NET = {
     enabled: true,
     /** Floor (ms): never tighter than ~2 broadcast gaps at 33Hz. */
     minMs: 50,
-    /** Ceiling (ms): cap the added lag; beyond this a link is just bad. Stays
-     *  within the lag-comp rewind budget so shots keep registering. */
-    maxMs: 200,
+    /** Ceiling (ms). 120 ≈ 4 broadcast gaps + a 60ms cushion. The old 200
+     *  existed to absorb burst-inflated "jitter" that the tick clock + p90
+     *  lateness no longer misread; real sustained lateness past 120ms is a
+     *  stall, which delay can't hide anyway (extrapolate/freeze handles it).
+     *  Budget: shooter comp ≈ RTT + this, so 120 + ~100ms RTT stays inside
+     *  `LAGCOMP.maxCompTicks` — and this ceiling directly bounds the victim's
+     *  "dodged but still died" rewind window, the fairness cost the old cap
+     *  amplified. */
+    maxMs: 120,
     /** Multiple of the mean snapshot interval to buffer (≥1 → always a newer
      *  sample to interpolate toward; 1.5 leaves half a gap of slack). */
     spacingFactor: 1.5,
-    /** Multiple of measured jitter to add as cushion above the spacing term. */
-    jitterFactor: 2,
+    /** Multiple of the p90 snapshot lateness (vs the tick timeline — see
+     *  `NetHealth.latenessMs`) added as cushion above the spacing term. p90 is
+     *  already near worst-case, so only a modest margin on top — ×2 of it
+     *  chronically over-delayed. */
+    latenessFactor: 1.25,
     /** Half-life (ms) for *raising* the delay — fast, to outrun a starving buffer. */
     raiseHalfLifeMs: 150,
-    /** Half-life (ms) for *lowering* it — slow, so transient jitter doesn't make
-     *  the delay itself jitter. */
-    lowerHalfLifeMs: 3000,
+    /** Half-life (ms) for *lowering* it. The p90-over-window lateness signal is
+     *  already stable (the old 3000 was double-smoothing on top of a spiky
+     *  EWMA), so recovery from a genuine spike can be twice as fast without the
+     *  delay itself time-warping remote ships. */
+    lowerHalfLifeMs: 1500,
+  },
+
+  /** Server-tick clock estimation (`net/tickClock.ts`) — the timebase that lets
+   *  interpolation run on the server's tick timeline instead of packet arrival
+   *  times (which TCP stalls turn into bursts). The windowed-min offset is
+   *  burst-immune (packets can only be *late*, never early); the applied offset
+   *  slews toward it at ≤`slewMaxMsPerSec` so the timeline never visibly steps,
+   *  and snaps only past `snapThresholdMs` (reconnect / tab-return). */
+  tickClock: {
+    /** Windowed-min horizon (ms) — a few fast deliveries always land inside. */
+    windowMs: 3000,
+    /** Rotating min-bucket width (ms): windowMs/bucketMs buckets, O(1)/snapshot. */
+    bucketMs: 500,
+    /** Max applied-offset slew (ms/s) → ≤2% time dilation, imperceptible. */
+    slewMaxMsPerSec: 20,
+    /** Raw-vs-applied gap beyond this (ms) snaps instead of slewing. */
+    snapThresholdMs: 250,
+  },
+
+  /** Present-time remote projectiles. Remote bullets/bombs are simulated forward
+   *  from the newest snapshot to the *estimated server present* (they're pure
+   *  deterministic flight — no input — so this is near-exact), instead of the
+   *  ships' interpolated past. This is what lets the defender actually see the
+   *  bullet that is about to hit them where it really is. */
+  remotePresent: {
+    /** Cap (ms) on how far past its snapshot a remote shot may be simulated.
+     *  Covers interp-delay + RTT on a healthy link with margin; during a longer
+     *  stall the shot freezes at the cap (the ships' extrapolation-freeze
+     *  philosophy) instead of flying on unbounded stale state. */
+    maxLeadMs: 250,
   },
 
   /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
@@ -270,6 +311,12 @@ export const NET = {
     jitterMs: 30,
     /** Per-packet drop chance, percent, each direction. */
     lossPct: 3,
+    /** TCP-stall simulation (hold everything `stallMs`, deliver as one burst,
+     *  every `stallEveryMs`) — the WebSocket/TCP head-of-line-blocking signature
+     *  of a retransmit or buffering proxy. 0 = off. Try 300 / 2000 to reproduce
+     *  the "deployed on TCP feels desynced" conditions locally. */
+    stallMs: 0,
+    stallEveryMs: 0,
   },
 } as const;
 
@@ -295,17 +342,19 @@ export const LAGCOMP = {
    *  still got hit" unfairness the rewind imposes on the *victim* (the cost lag
    *  comp pays to make the shooter feel instant).
    *
-   *  25t = 250ms (top of the roadmap's 150–250ms band, and what CLAUDE.md
-   *  documents). M2.11 raised this from 15t (150ms) after the live ~100ms-RTT test:
-   *  the real *view* delay a shot must compensate is `interpDelayMs` (~75ms, now up
-   *  to `adaptiveInterp.maxMs` 200ms under jitter) **plus the full RTT**, i.e.
-   *  ~175ms at 100ms RTT — which the old 150ms cap clamped *below*, so connecting
-   *  shots were under-rewound and eaten ("bombs hit but don't register"). 250ms
-   *  covers interp + a ~150ms-RTT link with margin; players past that trade back to
-   *  some under-compensation rather than a larger victim-side dodge-then-die window.
-   *  Also implicitly capped by `historyTicks-1` (you can't rewind past what's
-   *  recorded; 120t = 1.2s leaves ample room). */
-  maxCompTicks: 25,
+   *  18t = 180ms. The real *view* delay a shot must compensate is the interp
+   *  delay **plus the full RTT**. With the tick-timeline clock the interp delay
+   *  settles at ~50–70ms on a clean ~70ms-RTT link (needed comp ≈ 120–140ms),
+   *  and its ceiling is now 120ms (`adaptiveInterp.maxMs`), so 18t covers a
+   *  100ms-RTT + 80ms-interp link exactly and the common case with margin.
+   *  History: M2.11 raised 15t→25t because the old arrival-time jitter estimate
+   *  pushed interp to 200ms and shots clamped ("bombs hit but don't register");
+   *  with that mismeasurement fixed, 250ms mostly bought a bigger victim-side
+   *  dodge-then-die window, so this steps back down in the victim's favour.
+   *  Guard rail: the overlay's `clamp N/s` line — if clamps show up at moderate
+   *  RTT in live tests, step toward 20–22t. Also implicitly capped by
+   *  `historyTicks-1` (you can't rewind past what's recorded). */
+  maxCompTicks: 18,
 } as const;
 
 // --- Area-of-interest culling (M2.14) ----------------------------------------

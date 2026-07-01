@@ -74,7 +74,7 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 
 - `FixedLoop` in `sim/loop.ts` accumulates real elapsed time and drives exact 10ms sim steps.
 - The renderer runs per `requestAnimationFrame`, interpolating between `prevX/prevY/prevRotation` (previous tick) and current state using the leftover `alpha`.
-- For remote players under the multiplayer transport, this same mechanism extends to interpolating between buffered server snapshots with `interpDelay` (~100ms).
+- For remote players under the multiplayer transport, this same mechanism extends to interpolating between buffered server snapshots, rendered `interpDelay` (adaptive, ~50–120ms) in the past on the **server tick timeline** (M2.16 — `snap.tick × 10ms`, mapped to the client clock by `net/tickClock.ts`, not packet arrival times).
 
 ## Current milestone status
 
@@ -83,7 +83,8 @@ the M2.11+ responsiveness/efficiency pass is underway. The sequence is:
 ```
 M0 ✓ → M1 ✓ → M2.0–M2.10 ✓ (full netcode model)
      → M2.11 ✓ (measure & tune) → M2.12 ✗ (UDP transport — SKIPPED) → M2.13 ✓ binary+delta
-     → M2.14 ✓ AOI culling (stealth deferred to M5) → M2.15 ✓ input batching → M3 (UI) → ...
+     → M2.14 ✓ AOI culling (stealth deferred to M5) → M2.15 ✓ input batching
+     → M2.16 ✓ tick-timeline netcode (deployed-TCP desync fix) → M3 (UI) → ...
 ```
 
 M2.14 fills the per-client `serializeSnapshotFor` seam: each client is sent only entities within
@@ -111,7 +112,7 @@ present, so shots sailed through the drawn ghost). The pieces:
   sampled the command (`SnapshotInterpolator.renderTick()`, stamped in `main.ts`). The rewind rides
   *in the input*, so the server stays a pure function of its inputs — determinism holds.
 - **`Projectile.compTicks`**: `firingSystem` stamps `spawnTick − renderTick` (clamped to
-  `LAGCOMP.maxCompTicks` = 25t = 250ms and the history length) onto each shot; it carries for the
+  `LAGCOMP.maxCompTicks` = 18t = 180ms as of M2.16, and the history length) onto each shot; it carries for the
   shot's whole life so every flight-tick `collisionSystem` overlap test reaches `compTicks` into the
   past. The shot still *flies* in the present; only the *overlap test* rewinds.
 - **Scope:** both projectile *direct-hit* detection (`collisionSystem`) and bomb *splash*
@@ -126,11 +127,12 @@ interval + jitter, the live→target adaptive interp delay and buffer depth, and
 rates for snapshot loss/stale and extrapolation/freeze/comp-clamp events. `compTicks` shows
 `CLAMPED` when the desired rewind exceeds `LAGCOMP.maxCompTicks` (shots under-compensated).
 
-M2.11 also: **raised `LAGCOMP.maxCompTicks` 15t→25t (250ms)** so a ~100ms-RTT shot's full view
+M2.11 also: raised `LAGCOMP.maxCompTicks` 15t→25t (250ms) so a ~100ms-RTT shot's full view
 delay (`interpDelayMs` + RTT ≈ 175ms) is covered rather than clamped (the "bombs hit but don't
-register" bug); **made the interpolation delay adaptive** (`net/adaptiveInterp.ts`, driven by
+register" bug — M2.16 later stepped it back to 18t once the interp ceiling stopped inflating);
+**made the interpolation delay adaptive** (`net/adaptiveInterp.ts`, driven by
 `net/netHealth.ts`) so a jittery link stops starving the buffer; and reconciled the
-broadcast-rate doc drift (~33Hz, not 20Hz).
+broadcast-rate doc drift (~33Hz then; **50Hz as of M2.16**, `BROADCAST_EVERY` = 2).
 
 M2.13 replaces the JSON snapshot on the WebSocket data plane with a **binary, field-level
 delta** codec (M2.12 UDP was skipped). The seam is unchanged: the server still builds a plain
@@ -178,6 +180,29 @@ M2.4's replay are untouched. Pieces:
   `PlayerQueue` dedup (drops stale ≤ `lastProcessedSeq` and already-queued duplicates) makes the
   redundant overlap a no-op, so a dropped datagram is covered by the next with no round-trip /
   repeat-last hiccup. The overlay gained an **upstream** line: `up …/s  batch …  redund …`.
+
+M2.16 is the **deployed-TCP desync fix** (see `docs/roadmap.md` for full detail). Live testing on
+Railway (WSS = TCP, so retransmits/proxies deliver snapshots in stall-then-**burst** patterns)
+showed defenders taking hits from bullets drawn far away. Three root causes, three fixes:
+- **Interpolation ran on packet arrival times**, which bursts distort → everything now runs on the
+  **server tick timeline**: `net/tickClock.ts` (`ServerClock`) estimates client-clock ↔ tick-time
+  with a burst-immune windowed-**min** offset (late packets can't lower a min), slew-limited and
+  strictly monotonic. `pickStraddlingPair` keys on `tick × 10ms`; `renderTick` advances
+  continuously, so lag-comp stamps are stable.
+- **The adaptive interp delay ballooned** (a burst captured the inter-arrival jitter EWMA and held
+  it for seconds) → the signal is now the **p90 of windowed snapshot lateness** vs the tick
+  timeline (`NetHealth.latenessMs`); isolated bursts are ignored, sustained lateness still raises
+  it. Ceiling 200→**120ms**, and `LAGCOMP.maxCompTicks` stepped back 25t→**18t**.
+- **Remote projectiles rendered in the past while the local ship is predicted at present** → remote
+  shots are now forward-simmed from the newest snapshot to the **estimated server present**
+  (deterministic flight makes that near-exact; `NET.remotePresent.maxLeadMs` caps it), and
+  `net/incomingHits.ts` flashes the hit the instant an enemy shot overlaps the predicted local
+  ship (cosmetic; authoritative twin deduped, fatal hits never suppressed). `bombExploded` events
+  release promptly; ship-anchored events stay on the interpolated timeline.
+Also: netsim gained a TCP **stall mode** (`stallMs`/`stallEveryMs` — reproduces the Railway
+signature locally), the server skips broadcasts to a backpressured socket (`bufferedAmount` > 8KB)
+instead of queueing stale state, broadcasts are paced by sim ticks (not timer fires) at **50Hz**,
+and the overlay shows `late p90` + `srvclk off`.
 
 ## Key constraints
 

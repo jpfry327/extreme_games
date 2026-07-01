@@ -59,8 +59,8 @@ describe("SnapshotInterpolator", () => {
   it("interpolates a remote player halfway between two snapshots", () => {
     const interp = new SnapshotInterpolator();
     // Two snapshots 100ms apart for a remote ship moving (0,0) -> (100,200).
-    interp.push(snap(1, [playerAt("r", 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 200)]), 1100);
+    interp.push(snap(100, [playerAt("r", 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt("r", 100, 200)]), 1100);
 
     const view = viewWorld();
     // interpDelay 100ms; render at now=1150 -> renderTime=1050, exactly halfway.
@@ -76,8 +76,8 @@ describe("SnapshotInterpolator", () => {
 
   it("pins the local player to the newest snapshot (no interpolation)", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt(LOCAL, 100, 0)]), 1100);
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 100, 0)]), 1100);
 
     const view = viewWorld();
     // renderTime would be halfway (1050), but the local ship ignores that and
@@ -92,8 +92,8 @@ describe("SnapshotInterpolator", () => {
     const twoPi = Math.PI * 2;
     // 0.1 rad before the seam -> 0.1 rad after it. Short path passes through 0,
     // not the long way back through π.
-    interp.push(snap(1, [playerAt("r", 0, 0, twoPi - 0.1)]), 1000);
-    interp.push(snap(2, [playerAt("r", 0, 0, 0.1)]), 1100);
+    interp.push(snap(100, [playerAt("r", 0, 0, twoPi - 0.1)]), 1000);
+    interp.push(snap(110, [playerAt("r", 0, 0, 0.1)]), 1100);
 
     const view = viewWorld();
     interp.buildView(view, 1150, 100, LOCAL); // t = 0.5
@@ -110,9 +110,9 @@ describe("SnapshotInterpolator", () => {
     // (simulated deterministically so bounces don't teleport). buildView must
     // leave view.projectiles empty so those two sources start from a clean list.
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 0, 0)]), 1000);
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 0, 0)]), 1000);
     interp.push(
-      snap(2, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 40, 0), projectileAt(8, 99, 99)]),
+      snap(110, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 40, 0), projectileAt(8, 99, 99)]),
       1100,
     );
 
@@ -124,8 +124,8 @@ describe("SnapshotInterpolator", () => {
 
   it("drops a player that left in the newer snapshot", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0), playerAt("gone", 5, 5)]), 1000);
-    interp.push(snap(2, [playerAt(LOCAL, 0, 0)]), 1100);
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0), playerAt("gone", 5, 5)]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 0, 0)]), 1100);
 
     const view = viewWorld();
     interp.buildView(view, 1150, 100, LOCAL);
@@ -144,8 +144,8 @@ describe("SnapshotInterpolator", () => {
       x: 0,
       y: 0,
     };
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt(LOCAL, 0, 0)], [], [died]), 1100);
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 0, 0)], [], [died]), 1100);
 
     const view = viewWorld();
     // renderTime 1050 (<1100): the event's snapshot hasn't been reached yet.
@@ -161,10 +161,28 @@ describe("SnapshotInterpolator", () => {
     expect(view.events).toHaveLength(0);
   });
 
+  it("releases bombExploded promptly (present-anchored), other events in render time", () => {
+    const interp = new SnapshotInterpolator();
+    const boom: GameEvent = { type: "bombExploded", x: 0, y: 0, owner: "r" };
+    const died: GameEvent = { type: "shipDied", victim: "r", killer: LOCAL, bounty: 0, x: 0, y: 0 };
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 0, 0)], [], [boom, died]), 1100);
+
+    const view = viewWorld();
+    // renderTime 1050 (<1100): the boom fires now (its bullet is drawn at the
+    // present), the ship-anchored death waits for the interpolated timeline.
+    interp.buildView(view, 1150, 100, LOCAL);
+    expect(view.events.map((e) => e.type)).toEqual(["bombExploded"]);
+
+    // renderTime 1120 (≥1100): the death releases — and the boom doesn't repeat.
+    interp.buildView(view, 1220, 100, LOCAL);
+    expect(view.events.map((e) => e.type)).toEqual(["shipDied"]);
+  });
+
   it("holds at the newest snapshot when render time runs past the buffer", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt("r", 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 0)]), 1100);
+    interp.push(snap(100, [playerAt("r", 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt("r", 100, 0)]), 1100);
 
     const view = viewWorld();
     // renderTime 1500 is well past the newest sample (1100) — a lag spike. We
@@ -175,10 +193,10 @@ describe("SnapshotInterpolator", () => {
 
   it("picks the correct pair among many buffered snapshots", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt("r", 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 0)]), 1100);
-    interp.push(snap(3, [playerAt("r", 200, 0)]), 1200);
-    interp.push(snap(4, [playerAt("r", 300, 0)]), 1300);
+    interp.push(snap(100, [playerAt("r", 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt("r", 100, 0)]), 1100);
+    interp.push(snap(120, [playerAt("r", 200, 0)]), 1200);
+    interp.push(snap(130, [playerAt("r", 300, 0)]), 1300);
 
     const view = viewWorld();
     // renderTime = 1250 - 100 = 1150 — halfway through the middle interval,
@@ -190,8 +208,8 @@ describe("SnapshotInterpolator", () => {
 
   it("clamps to the oldest snapshot before the buffer's start", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt("r", 10, 20)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 200)]), 1100);
+    interp.push(snap(100, [playerAt("r", 10, 20)]), 1000);
+    interp.push(snap(110, [playerAt("r", 100, 200)]), 1100);
 
     const view = viewWorld();
     // renderTime = 950, before the oldest sample (1000): clamp to the oldest pose.
@@ -203,8 +221,8 @@ describe("SnapshotInterpolator", () => {
 
   it("shows a newly-joined remote player at its pose without smearing", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt(LOCAL, 0, 0), playerAt("joiner", 500, 600)]), 1100);
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 0, 0), playerAt("joiner", 500, 600)]), 1100);
 
     const view = viewWorld();
     // The joiner is only in the newer snapshot — no older pose to lerp from, so
@@ -220,8 +238,8 @@ describe("SnapshotInterpolator", () => {
     const dead = playerAt("r", 50, 50);
     dead.combat.respawnAt = 9999; // dead at the death site in the older snapshot
     const spawned = playerAt("r", 900, 900); // alive at a fresh spawn in the newer
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0), dead]), 1000);
-    interp.push(snap(2, [playerAt(LOCAL, 0, 0), spawned]), 1100);
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0), dead]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 0, 0), spawned]), 1100);
 
     const view = viewWorld();
     // t = 0.5 — a naive lerp would put the ship at (475, 475), mid-map. The
@@ -236,8 +254,8 @@ describe("SnapshotInterpolator", () => {
     const interp = new SnapshotInterpolator();
     const older = playerAt("r", 0, 0);
     const newer = playerAt("r", 100, 200);
-    interp.push(snap(1, [older]), 1000);
-    interp.push(snap(2, [newer]), 1100);
+    interp.push(snap(100, [older]), 1000);
+    interp.push(snap(110, [newer]), 1100);
 
     const view = viewWorld();
     interp.buildView(view, 1150, 100, LOCAL); // lerp path (both alive)
@@ -247,5 +265,43 @@ describe("SnapshotInterpolator", () => {
     expect(older.kinematics.x).toBe(0);
     expect(newer.kinematics.x).toBe(100);
     expect(view.players.get("r")!.kinematics).not.toBe(newer.kinematics);
+  });
+
+  it("interpolates across a burst of snapshots that arrived at the same instant", () => {
+    const interp = new SnapshotInterpolator();
+    interp.push(snap(100, [playerAt("r", 0, 0)]), 1000);
+    // TCP stall: ticks 110 and 120 are held and delivered together at 1400. On
+    // the old arrival-time timeline their span was 0ms (interpolation between
+    // them was impossible); on the tick timeline they sit at 1100 and 1200
+    // regardless of when the wire delivered them.
+    interp.push(snap(110, [playerAt("r", 100, 0)]), 1400);
+    interp.push(snap(120, [playerAt("r", 200, 0)]), 1400);
+
+    const view = viewWorld();
+    interp.buildView(view, 1400, 250, LOCAL); // renderTime = 1150, halfway 110→120
+    expect(view.players.get("r")!.kinematics.x).toBeCloseTo(150);
+  });
+
+  it("renderTick advances monotonically through stall-then-burst arrival", () => {
+    const interp = new SnapshotInterpolator();
+    // Regular ~33Hz stream with a 40ms transit…
+    for (let tick = 100; tick <= 130; tick += 3) {
+      interp.push(snap(tick, [playerAt("r", 0, 0)]), tick * 10 + 40);
+    }
+    // …then a 300ms stall: ticks 133..160 all delivered in one burst. Late
+    // packets can't lower the windowed-min clock offset, so the timeline — and
+    // with it the lag-comp stamp — must keep advancing smoothly.
+    for (let tick = 133; tick <= 160; tick += 3) {
+      interp.push(snap(tick, [playerAt("r", 0, 0)]), 1940);
+    }
+    let prev = -Infinity;
+    for (let now = 1400; now <= 2000; now += 16) {
+      const rt = interp.renderTick(now, 75, 100);
+      expect(rt).not.toBeNull();
+      expect(rt!).toBeGreaterThanOrEqual(prev);
+      prev = rt!;
+    }
+    // And it actually advanced (not pinned by the monotonic guard).
+    expect(prev).toBeGreaterThan(130);
   });
 });

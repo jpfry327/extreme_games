@@ -40,6 +40,30 @@ describe("NetHealth — snapshot timing", () => {
   });
 });
 
+describe("NetHealth — lateness (adaptive-delay signal)", () => {
+  it("ignores an isolated stall burst (p90 cuts the worst ~10%)", () => {
+    const h = new NetHealth();
+    let t = 1000;
+    for (let i = 0; i < 50; i++) {
+      // 4 of 50 samples (8%) are a 300ms stall burst — below the p90 cutoff, so
+      // one TCP stall must not swell the interp-delay cushion (the old EWMA did).
+      h.onSnapshot(i * 3, t, i >= 20 && i < 24 ? 300 : 0);
+      t += 30;
+    }
+    expect(h.latenessMs).toBe(0);
+  });
+
+  it("rises under sustained lateness — the case where more delay helps", () => {
+    const h = new NetHealth();
+    let t = 1000;
+    for (let i = 0; i < 100; i++) {
+      h.onSnapshot(i * 3, t, 80);
+      t += 30;
+    }
+    expect(h.latenessMs).toBe(80);
+  });
+});
+
 describe("NetHealth — loss & stale", () => {
   it("infers missed snapshots from a server-tick gap", () => {
     const h = new NetHealth();

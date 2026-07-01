@@ -394,6 +394,57 @@ repeat-last hiccup — covered by the in-datagram redundancy, no round-trip.
 
 ---
 
+### M2.16 — Tick-timeline netcode (the deployed-TCP desync fix)  ✓
+
+**Goal:** make the deployed game (WSS over TCP — Railway) play like the local
+one at ~70ms RTT. Live two-player testing showed the defender taking hits from
+bullets drawn far away; diagnosis: everything time-based on the client was keyed
+on packet **arrival times**, which TCP stall-then-burst delivery (retransmits,
+proxy buffering) distorts wholesale.
+
+**Scope:**
+- [x] **Netsim TCP-stall mode** (`stallMs`/`stallEveryMs`): hold both directions
+      and release as one in-order burst — the deployed failure signature,
+      reproducible locally. (Found and fixed a browser gotcha: setTimeout delays
+      coerce to integer ms, so burst FIFO needs whole-ms spacing.)
+- [x] **`ServerClock`** (`net/tickClock.ts`): windowed-min offset estimator
+      mapping `performance.now()` → server tick time. Bursts only make packets
+      *late*, never early, so the min ignores them; the applied offset slews at
+      ≤20ms/s (strictly monotonic) and snaps only past 250ms (tab-return).
+- [x] **Tick-timeline interpolation:** `pickStraddlingPair` keys on
+      `snap.tick × 10ms`, `renderTick` advances continuously with a monotonic
+      floor (stable lag-comp stamps), events watermark by tick.
+- [x] **Lateness-based adaptive delay:** the p90 of a windowed per-snapshot
+      lateness (vs the tick timeline) replaces the inter-arrival jitter EWMA,
+      which a single burst captured and held for seconds (the "interp pinned at
+      its cap" balloon). Spacing comes from the tick-gap mode.
+- [x] **Remote projectiles at the estimated server present** (deterministic
+      flight → near-exact extrapolation; `NET.remotePresent.maxLeadMs` freeze
+      cap), so the defender sees the bullet that's about to hit them where it
+      really is; `bombExploded` releases promptly (its bullet is present-timed).
+- [x] **Incoming-hit feedback** (`net/incomingHits.ts`): enemy shot overlaps the
+      predicted local ship → instant flash + the bullet stops at the ship;
+      authoritative twin deduped, fatal hits never suppressed. Restores "when a
+      bullet hits you, you know" under server authority.
+- [x] **Tuning:** `adaptiveInterp.maxMs` 200→120, `latenessFactor` 1.25,
+      `lowerHalfLifeMs` 1500, `LAGCOMP.maxCompTicks` 25t→18t (the interp ceiling
+      no longer inflates the rewind the victim pays for).
+- [x] **Server:** skip broadcasts to a socket with >8KB buffered (bounds the
+      post-stall stale burst; safe under the acked-baseline delta model), pace
+      broadcasts by sim ticks (not timer fires), raise broadcast rate to
+      **50Hz** (`BROADCAST_EVERY` 2 — separate revertible commit).
+
+**Verified:** headless-browser e2e vs the real server with stall 300ms/2s —
+interp holds ≤120ms (vs pinned 200ms before), server-clock offset stable within
+slew across bursts, `lagcomp` ≤ 180ms with `clamp 0/s`, stale drops 0/s.
+
+**Out of scope:** UDP-class transport (WebTransport/WebRTC — Railway has no UDP
+ingress; revisit with a host change if TCP-optimized still isn't enough), and
+victim-authoritative hits (original Subspace model; could be a flagged
+experiment later).
+
+---
+
 ## M3 — Client surfaces / UI foundation
 
 **Goal:** build the bitmap-font UI toolkit and the lobby's core surfaces so it
