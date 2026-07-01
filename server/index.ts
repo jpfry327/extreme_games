@@ -89,6 +89,9 @@ interface Session {
   pingSentAt: number;
   /** Messages received from this socket in the current rate-limit window. */
   msgsThisSec: number;
+  /** Broadcasts skipped because this socket's TCP send buffer was backed up
+   *  (see MAX_BUFFERED_BYTES). Logged and reset by the 1Hz timer. */
+  skippedBroadcasts: number;
 }
 const sessions: Session[] = [];
 let nextId = 1;
@@ -123,6 +126,18 @@ function buildSharedSnapshot(pings: Record<PlayerId, number>): Snapshot {
   };
 }
 
+/** Skip a client's broadcast once its socket has this much unsent data queued.
+ *  A stalled TCP path (retransmit, proxy buffering) otherwise queues every
+ *  broadcast in order and delivers them as one burst of *stale* snapshots when
+ *  it recovers — the exact head-of-line pattern the client's tick clock has to
+ *  ride out. Typical encoded frames are ~0.1–1KB, so 8KB ≈ a quarter-second of
+ *  snapshots: past that, dropping broadcasts bounds the recovery burst to what
+ *  interpolation + extrapolation absorb. Skipping is safe for the delta channel
+ *  — deltas ride only *acked* baselines, and an unsent frame simply never
+ *  becomes one; if the ack ages out entirely, encodeFor recovers with a
+ *  keyframe. */
+const MAX_BUFFERED_BYTES = 8 * 1024;
+
 function broadcast(): void {
   const pings = pingMap();
   // One quantize per broadcast (fresh, f32-rounded objects), shared by every
@@ -132,6 +147,12 @@ function broadcast(): void {
   const quantized = quantizeSnapshot(buildSharedSnapshot(pings));
   for (const s of sessions) {
     if (s.ws.readyState !== WebSocket.OPEN) continue;
+    // Backpressure guard — checked *before* encodeFor, which has side effects
+    // (baseline ring push, keyframe counter) that must track sent frames only.
+    if (s.ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+      s.skippedBroadcasts++;
+      continue;
+    }
     const bytes = snapshots.encodeFor(
       s.playerId,
       quantized,
@@ -201,7 +222,15 @@ wss.on("connection", (ws) => {
       // Server owns spawn assignment — addPlayer runs findSpawn server-side; the
       // client never picks a position (M2.7).
       world.addPlayer(playerId, msg.name, 0, WARBIRD);
-      session = { ws, playerId, name: msg.name, rttMs: 0, pingSentAt: 0, msgsThisSec: 0 };
+      session = {
+        ws,
+        playerId,
+        name: msg.name,
+        rttMs: 0,
+        pingSentAt: 0,
+        msgsThisSec: 0,
+        skippedBroadcasts: 0,
+      };
       sessions.push(session);
       send(ws, { type: "welcome", playerId });
       console.info(`[+] ${msg.name} → ${playerId}  (${sessions.length} connected)`);
@@ -248,6 +277,12 @@ wss.on("connection", (ws) => {
 setInterval(() => {
   for (const s of sessions) {
     s.msgsThisSec = 0;
+    if (s.skippedBroadcasts > 0) {
+      console.info(
+        `[server] ${s.name} (${s.playerId}): skipped ${s.skippedBroadcasts} broadcasts (TCP backpressure)`,
+      );
+      s.skippedBroadcasts = 0;
+    }
     if (s.ws.readyState === WebSocket.OPEN) {
       s.pingSentAt = performance.now();
       s.ws.ping();
