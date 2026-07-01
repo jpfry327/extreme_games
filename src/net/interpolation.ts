@@ -140,6 +140,11 @@ export class SnapshotInterpolator {
   /** Tick of the newest snapshot whose events have already been released.
    *  Events fire once, in interpolated time, when render time passes them. */
   private lastEventTick = -Infinity;
+  /** Tick of the newest snapshot whose *prompt* events (bombExploded) have been
+   *  released. Remote projectiles render at the estimated server present, so
+   *  their detonations must not wait for the past-timeline render time — a
+   *  bullet would vanish at the wall and its boom draw ~interpDelay later. */
+  private lastPromptEventTick = -Infinity;
   /** Maps the client clock onto the server tick timeline; fed by every push. */
   private readonly clock = new ServerClock(NET.tickClock, TICK_MS);
   /** Monotonic floor for `renderTick` — a clock snap (reconnect / tab-return)
@@ -269,17 +274,32 @@ export class SnapshotInterpolator {
     // start from an empty list each frame.
     view.projectiles.length = 0;
 
-    // --- events: release each snapshot's events once, in interpolated time ---
+    // --- events: release each snapshot's events once ------------------------
     // Watermarked by server tick, so a burst of snapshots arriving together
     // (which share one receivedAt — the ambiguity the old arrival-time watermark
-    // had) still release strictly once each, when render time passes their tick.
+    // had) still release strictly once each. Release time splits by what the
+    // event anchors to:
+    //   - ship-anchored events (shipHit / shipDied / playerSpawned) wait for the
+    //     interpolated render time to pass their tick — ships are drawn in the
+    //     past, so their effects must be too;
+    //   - bombExploded releases immediately on arrival — remote projectiles are
+    //     drawn at the estimated server *present*, so a detonation held back by
+    //     ~interpDelay would fire long after its bullet visually vanished.
     view.events.length = 0;
     for (const buf of this.buffer) {
+      if (buf.snap.tick > this.lastPromptEventTick) {
+        for (const e of buf.snap.events) {
+          if (e.type === "bombExploded") view.events.push(e);
+        }
+      }
       if (buf.snap.tick > this.lastEventTick && buf.snap.tick * TICK_MS <= renderTime) {
-        for (const e of buf.snap.events) view.events.push(e);
+        for (const e of buf.snap.events) {
+          if (e.type !== "bombExploded") view.events.push(e);
+        }
         this.lastEventTick = buf.snap.tick;
       }
     }
+    this.lastPromptEventTick = newest.snap.tick;
   }
 }
 

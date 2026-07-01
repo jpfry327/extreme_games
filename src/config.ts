@@ -254,6 +254,19 @@ export const NET = {
     snapThresholdMs: 250,
   },
 
+  /** Present-time remote projectiles. Remote bullets/bombs are simulated forward
+   *  from the newest snapshot to the *estimated server present* (they're pure
+   *  deterministic flight — no input — so this is near-exact), instead of the
+   *  ships' interpolated past. This is what lets the defender actually see the
+   *  bullet that is about to hit them where it really is. */
+  remotePresent: {
+    /** Cap (ms) on how far past its snapshot a remote shot may be simulated.
+     *  Covers interp-delay + RTT on a healthy link with margin; during a longer
+     *  stall the shot freezes at the cap (the ships' extrapolation-freeze
+     *  philosophy) instead of flying on unbounded stale state. */
+    maxLeadMs: 250,
+  },
+
   /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
    *  leaves no sample newer than render time), remote entities are dead-reckoned
    *  forward from their last known velocity for at most this long, then frozen in

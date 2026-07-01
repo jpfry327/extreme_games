@@ -161,6 +161,24 @@ describe("SnapshotInterpolator", () => {
     expect(view.events).toHaveLength(0);
   });
 
+  it("releases bombExploded promptly (present-anchored), other events in render time", () => {
+    const interp = new SnapshotInterpolator();
+    const boom: GameEvent = { type: "bombExploded", x: 0, y: 0, owner: "r" };
+    const died: GameEvent = { type: "shipDied", victim: "r", killer: LOCAL, bounty: 0, x: 0, y: 0 };
+    interp.push(snap(100, [playerAt(LOCAL, 0, 0)]), 1000);
+    interp.push(snap(110, [playerAt(LOCAL, 0, 0)], [], [boom, died]), 1100);
+
+    const view = viewWorld();
+    // renderTime 1050 (<1100): the boom fires now (its bullet is drawn at the
+    // present), the ship-anchored death waits for the interpolated timeline.
+    interp.buildView(view, 1150, 100, LOCAL);
+    expect(view.events.map((e) => e.type)).toEqual(["bombExploded"]);
+
+    // renderTime 1120 (≥1100): the death releases — and the boom doesn't repeat.
+    interp.buildView(view, 1220, 100, LOCAL);
+    expect(view.events.map((e) => e.type)).toEqual(["shipDied"]);
+  });
+
   it("holds at the newest snapshot when render time runs past the buffer", () => {
     const interp = new SnapshotInterpolator();
     interp.push(snap(100, [playerAt("r", 0, 0)]), 1000);
