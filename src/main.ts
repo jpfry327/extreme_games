@@ -540,8 +540,10 @@ function setupNetSimPanel(transport: SimulatedTransport): void {
   const latency = $<HTMLInputElement>("ns-latency");
   const jitter = $<HTMLInputElement>("ns-jitter");
   const loss = $<HTMLInputElement>("ns-loss");
+  const stall = $<HTMLInputElement>("ns-stall");
+  const stallEvery = $<HTMLInputElement>("ns-stall-every");
   // Bail quietly if the panel isn't in the DOM (keeps the client robust).
-  if (!enabled || !latency || !jitter || !loss) return;
+  if (!enabled || !latency || !jitter || !loss || !stall || !stallEvery) return;
 
   const p = transport.params;
   const sync = () => {
@@ -549,9 +551,13 @@ function setupNetSimPanel(transport: SimulatedTransport): void {
     latency.value = String(p.latencyMs);
     jitter.value = String(p.jitterMs);
     loss.value = String(p.lossPct);
+    stall.value = String(p.stallMs);
+    stallEvery.value = String(p.stallEveryMs);
     $("ns-latency-val").textContent = `${p.latencyMs}ms`;
     $("ns-jitter-val").textContent = `±${p.jitterMs}ms`;
     $("ns-loss-val").textContent = `${p.lossPct}%`;
+    $("ns-stall-val").textContent = `${p.stallMs}ms`;
+    $("ns-stall-every-val").textContent = p.stallEveryMs > 0 ? `/${p.stallEveryMs}ms` : "off";
   };
 
   enabled.addEventListener("change", () => {
@@ -568,6 +574,14 @@ function setupNetSimPanel(transport: SimulatedTransport): void {
   });
   loss.addEventListener("input", () => {
     p.lossPct = Number(loss.value);
+    sync();
+  });
+  stall.addEventListener("input", () => {
+    p.stallMs = Number(stall.value);
+    sync();
+  });
+  stallEvery.addEventListener("input", () => {
+    p.stallEveryMs = Number(stallEvery.value);
     sync();
   });
   sync();

@@ -270,6 +270,12 @@ export const NET = {
     jitterMs: 30,
     /** Per-packet drop chance, percent, each direction. */
     lossPct: 3,
+    /** TCP-stall simulation (hold everything `stallMs`, deliver as one burst,
+     *  every `stallEveryMs`) — the WebSocket/TCP head-of-line-blocking signature
+     *  of a retransmit or buffering proxy. 0 = off. Try 300 / 2000 to reproduce
+     *  the "deployed on TCP feels desynced" conditions locally. */
+    stallMs: 0,
+    stallEveryMs: 0,
   },
 } as const;
 
