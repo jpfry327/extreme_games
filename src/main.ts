@@ -168,8 +168,8 @@ async function main() {
     newestSnapTick = snap.tick;
 
     const now = performance.now();
-    health.onSnapshot(snap.tick, now); // M2.11: jitter + tick-gap loss tracking
-    interp.push(snap, now);
+    interp.push(snap, now); // feeds the tick clock — push before reading lateness
+    health.onSnapshot(snap.tick, now, interp.lastLatenessMs); // lateness + tick-gap loss
     // M2.4 reconciliation: measure prediction error *before* the ack drops the
     // un-acked inputs (so this frame's replay still recorded the acked seq).
     const local = snap.players.find((p) => p.id === view.localPlayerId);
@@ -265,11 +265,11 @@ async function main() {
     }
 
     // M2.11: ease the interpolation delay toward the measured link (snapshot
-    // spacing + jitter), then use this single value everywhere this frame
-    // (renderTick stamping, buildView, remote projectiles) so ships and bullets
-    // stay on one timeline. Falls back to the fixed NET.interpDelayMs when adaptive
-    // is off or before any snapshot timing exists.
-    adaptiveInterp.update(health.meanIntervalMs, health.jitterMs, dt);
+    // spacing + p90 lateness vs the tick timeline), then use this single value
+    // everywhere this frame (renderTick stamping, buildView, remote projectiles)
+    // so ships and bullets stay on one timeline. Falls back to the fixed
+    // NET.interpDelayMs when adaptive is off or before any snapshot timing exists.
+    adaptiveInterp.update(health.meanIntervalMs, health.latenessMs, dt);
     const interpMs = adaptiveInterp.ms;
 
     // Produce one stamped command per elapsed sim tick (not per render frame)
@@ -386,8 +386,7 @@ async function main() {
     // cross-check. Appended alongside the predicted own-shots above.
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
-      now,
-      interpMs,
+      interp.renderTimeMs(now, interpMs),
       view.localPlayerId,
       NET.extrapolateMaxMs,
     );
@@ -452,7 +451,11 @@ async function main() {
 
     // Record this frame's health gauges (buffer/extrapolation from the same straddle
     // the interpolator used) and roll up the per-second rates shown below.
-    const straddle = pickStraddlingPair(interp.snapshots, now - interpMs, NET.extrapolateMaxMs);
+    const straddle = pickStraddlingPair(
+      interp.snapshots,
+      interp.renderTimeMs(now, interpMs) ?? 0,
+      NET.extrapolateMaxMs,
+    );
     const extrapMs = straddle?.extrapMs ?? 0;
     health.onFrame(dt, {
       bufferDepth: interp.snapshots.length,
@@ -471,7 +474,8 @@ async function main() {
     netdebug.textContent =
       `── netcode (M2.11) ──\n` +
       `ping ${ping}ms  ack ${inputMgr.rttMs.toFixed(0)}ms\n` +
-      `jitter ±${health.jitterMs.toFixed(0)}ms  in-buf ${serverInputDepth}\n` +
+      `late p90 ${health.latenessMs.toFixed(0)}ms  jitter ±${health.jitterMs.toFixed(0)}ms  in-buf ${serverInputDepth}\n` +
+      `srvclk off ${interp.clockOffsetMs?.toFixed(0) ?? "—"}ms\n` +
       // M2.15 upstream: datagram send rate (down from ~100/s), inputs per datagram,
       // and the redundancy depth that lets a dropped one recover without a round-trip.
       `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}\n` +

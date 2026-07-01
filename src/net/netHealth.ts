@@ -12,13 +12,22 @@
  * inputs drive it — `onSnapshot`/`onStaleSnapshot` from the snapshot handler, and
  * `onFrame` from the render loop — and everything is read back through getters.
  *
- * Two clocks, deliberately: **snapshot timing** (jitter, loss) is measured from
+ * Two clocks, deliberately: **snapshot timing** (lateness, loss) is measured from
  * wall-clock arrival + the snapshot's server tick; **per-frame events**
  * (extrapolation, freeze, comp-clamp) are counted in the render loop and rolled up
  * into per-second rates over a 1s window. Loss is derived from server-**tick gaps**
  * (a fixed broadcast step, so a gap that's a multiple of it = that many missed)
  * rather than from time, which is far more robust to jitter.
+ *
+ * The adaptive-delay signal is **lateness vs the tick timeline** (from the
+ * `ServerClock`, via `onSnapshot`), summarized as the p90 of a ~3s window — not
+ * the old EWMA of inter-arrival deviation. The difference matters over TCP: a
+ * stall-then-burst spikes every arrival interval, an EWMA gets captured by it
+ * and decays slowly (the "interp delay balloons to its cap and stays" failure),
+ * while a p90 ignores isolated bursts entirely yet still rises under
+ * *sustained* lateness — the only condition where more delay actually helps.
  */
+import { TICK_DT } from "../config";
 
 /** Per-second event tallies, reset each rollup window. */
 interface Counters {
@@ -61,12 +70,16 @@ export interface FrameGauges {
 }
 
 export class NetHealth {
-  // --- snapshot arrival timing (for jitter + the adaptive delay) ---
+  // --- snapshot arrival timing (for the overlay + the adaptive delay) ---
   private lastSnapMs = -1;
-  private meanInterval = 0; // EWMA of inter-arrival ms
-  private jitter = 0; // EWMA of |interval − meanInterval|
+  private meanInterval = 0; // EWMA of inter-arrival ms (fallback until tickStep locks)
+  private jitter = 0; // EWMA of |interval − meanInterval| (overlay diagnostics only)
   /** EWMA smoothing factor for the interval/jitter estimates. */
   private static readonly ALPHA = 0.1;
+  /** Recent per-snapshot lateness samples (ms vs the tick timeline) — ~3s at
+   *  33Hz. The p90 of this ring is the adaptive-delay cushion signal. */
+  private readonly lateness: number[] = [];
+  private static readonly LATENESS_WINDOW = 100;
 
   // --- snapshot tick tracking (for loss) ---
   private lastSnapTick = -1;
@@ -96,9 +109,13 @@ export class NetHealth {
   };
 
   /** Record an accepted (in-order) snapshot. `tick` is its server tick, `nowMs` the
-   *  `performance.now()` at receipt. */
-  onSnapshot(tick: number, nowMs: number): void {
+   *  `performance.now()` at receipt, `latenessMs` how late it arrived vs the
+   *  tick-timeline fastest path (`SnapshotInterpolator.lastLatenessMs`). */
+  onSnapshot(tick: number, nowMs: number, latenessMs = 0): void {
     this.accruing.received++;
+
+    this.lateness.push(latenessMs);
+    if (this.lateness.length > NetHealth.LATENESS_WINDOW) this.lateness.shift();
 
     if (this.lastSnapMs >= 0) {
       const interval = nowMs - this.lastSnapMs;
@@ -150,13 +167,23 @@ export class NetHealth {
     }
   }
 
-  /** EWMA of the snapshot inter-arrival interval (ms). 0 before two snapshots. */
+  /** The snapshot spacing (ms). Once the broadcast step is discovered from the
+   *  tick-gap mode this is exact (`tickStep × 10ms`) and immune to burst
+   *  arrival; before that it falls back to the inter-arrival EWMA. 0 before two
+   *  snapshots. */
   get meanIntervalMs(): number {
-    return this.meanInterval;
+    return this.tickStep > 0 ? this.tickStep * TICK_DT * 1000 : this.meanInterval;
   }
-  /** EWMA of inter-arrival jitter (ms) — mean absolute deviation of the interval. */
+  /** EWMA of inter-arrival jitter (ms) — mean absolute deviation of the interval.
+   *  Overlay diagnostics only; the adaptive delay uses `latenessMs` instead. */
   get jitterMs(): number {
     return this.jitter;
+  }
+  /** p90 of the recent lateness window (ms) — the adaptive-delay cushion. */
+  get latenessMs(): number {
+    if (this.lateness.length === 0) return 0;
+    const sorted = [...this.lateness].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
   }
 
   /** Latest per-frame gauges. */

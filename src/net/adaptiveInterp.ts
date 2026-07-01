@@ -9,10 +9,12 @@
  * snapshot stream instead.
  *
  * Target: enough buffer to always hold a snapshot pair straddling render time
- * (≈ a multiple of the mean inter-arrival spacing) plus a cushion proportional to
- * measured jitter:
+ * (≈ a multiple of the snapshot spacing) plus a cushion proportional to how late
+ * snapshots run vs the tick timeline (`NetHealth.latenessMs` — a windowed p90,
+ * so an isolated TCP stall-burst doesn't capture it the way it captured the old
+ * inter-arrival jitter EWMA):
  *
- *   target = clamp(meanIntervalMs * spacingFactor + jitterMs * jitterFactor,
+ *   target = clamp(meanIntervalMs * spacingFactor + latenessMs * latenessFactor,
  *                  minMs, maxMs)
  *
  * The live value eases toward `target` with an **asymmetric** half-life — raise
@@ -30,7 +32,7 @@ export interface AdaptiveInterpConfig {
   minMs: number;
   maxMs: number;
   spacingFactor: number;
-  jitterFactor: number;
+  latenessFactor: number;
   raiseHalfLifeMs: number;
   lowerHalfLifeMs: number;
 }
@@ -51,14 +53,14 @@ export class AdaptiveInterpDelay {
 
   /**
    * Re-aim and ease the delay toward the link's needs. `meanIntervalMs` /
-   * `jitterMs` come from `NetHealth`; `dtSeconds` is the render frame's elapsed
+   * `latenessMs` come from `NetHealth`; `dtSeconds` is the render frame's elapsed
    * time. No-op (holds the initial value) while disabled or before timing exists.
    */
-  update(meanIntervalMs: number, jitterMs: number, dtSeconds: number): void {
+  update(meanIntervalMs: number, latenessMs: number, dtSeconds: number): void {
     if (!this.cfg.enabled || meanIntervalMs <= 0) return;
 
     this.target = clamp(
-      meanIntervalMs * this.cfg.spacingFactor + jitterMs * this.cfg.jitterFactor,
+      meanIntervalMs * this.cfg.spacingFactor + latenessMs * this.cfg.latenessFactor,
       this.cfg.minMs,
       this.cfg.maxMs,
     );

@@ -28,12 +28,11 @@
  * this simulation is cosmetic-until-confirmed, exactly like predicted own-shots.
  */
 
-import { TICK_DT } from "../config";
 import type { GameMap } from "../sim/gamemap";
 import type { PlayerId, Projectile } from "../sim/types";
 import { projectileSystem } from "../sim/systems/projectiles";
 import { World } from "../sim/world";
-import { type BufferedSnapshot, pickStraddlingPair } from "./interpolation";
+import { type BufferedSnapshot, TICK_MS, pickStraddlingPair } from "./interpolation";
 
 export class RemoteProjectileSimulator {
   /** A tiny, never-networked world holding *only* a map. Each `simulate` call
@@ -48,8 +47,9 @@ export class RemoteProjectileSimulator {
 
   /**
    * Compute the render poses of all **remote** projectiles (owner ≠ the local
-   * player) at render time `nowMs − interpDelayMs`, by simulating the latest
-   * authoritative snapshot forward instead of lerping it.
+   * player) at `renderTimeMs` — the interpolator's tick-timeline render time
+   * (`SnapshotInterpolator.renderTimeMs`; null before the first snapshot) — by
+   * simulating the latest authoritative snapshot forward instead of lerping it.
    *
    * `snapshots` is the interpolator's own buffer (shared by reference) so this
    * resolves against the exact same render window the remote ships use.
@@ -60,13 +60,12 @@ export class RemoteProjectileSimulator {
    */
   simulate(
     snapshots: readonly BufferedSnapshot[],
-    nowMs: number,
-    interpDelayMs: number,
+    renderTimeMs: number | null,
     localPlayerId: PlayerId,
     extrapolateMaxMs = 0,
   ): Projectile[] {
-    const renderTime = nowMs - interpDelayMs;
-    const pair = pickStraddlingPair(snapshots, renderTime, extrapolateMaxMs);
+    if (renderTimeMs === null) return [];
+    const pair = pickStraddlingPair(snapshots, renderTimeMs, extrapolateMaxMs);
     if (!pair) return [];
     const { a, b, extrapMs } = pair;
 
@@ -79,8 +78,8 @@ export class RemoteProjectileSimulator {
     // pair, so we advance from `a` to render time. When the buffer has starved
     // (`extrapMs > 0`, render time past the newest sample) we dead-reckon by the
     // clamped extrapolation window instead — the same bound the ships use.
-    const stepMs = extrapMs > 0 ? extrapMs : Math.max(0, renderTime - a.receivedAt);
-    const stepTicks = stepMs / (1000 * TICK_DT);
+    const stepMs = extrapMs > 0 ? extrapMs : Math.max(0, renderTimeMs - a.snap.tick * TICK_MS);
+    const stepTicks = stepMs / TICK_MS;
     const wholeTicks = Math.floor(stepTicks);
     const frac = stepTicks - wholeTicks; // sub-tick remainder for smooth motion
 

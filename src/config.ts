@@ -207,11 +207,11 @@ export const NET = {
 
   /** Adaptive interpolation delay (M2.11). Instead of a fixed `interpDelayMs`, the
    *  client raises/lowers the delay to track the link: enough buffer to always have
-   *  a straddling snapshot pair (≈ spacing) plus a jitter cushion, so a jittery
+   *  a straddling snapshot pair (≈ spacing) plus a lateness cushion, so a jittery
    *  connection stops starving the buffer (the "remote ships jump" symptom) without
    *  permanently over-delaying a clean one.
    *
-   *    target = clamp(meanIntervalMs * spacingFactor + jitterMs * jitterFactor,
+   *    target = clamp(meanIntervalMs * spacingFactor + latenessMs * latenessFactor,
    *                   minMs, maxMs)
    *
    *  The live value eases toward `target` with an asymmetric half-life — raise fast
@@ -227,8 +227,9 @@ export const NET = {
     /** Multiple of the mean snapshot interval to buffer (≥1 → always a newer
      *  sample to interpolate toward; 1.5 leaves half a gap of slack). */
     spacingFactor: 1.5,
-    /** Multiple of measured jitter to add as cushion above the spacing term. */
-    jitterFactor: 2,
+    /** Multiple of the p90 snapshot lateness (vs the tick timeline — see
+     *  `NetHealth.latenessMs`) added as cushion above the spacing term. */
+    latenessFactor: 2,
     /** Half-life (ms) for *raising* the delay — fast, to outrun a starving buffer. */
     raiseHalfLifeMs: 150,
     /** Half-life (ms) for *lowering* it — slow, so transient jitter doesn't make
