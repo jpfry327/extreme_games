@@ -297,7 +297,7 @@ setInterval(() => {
 // ---------- tick loop ---------------------------------------------------------
 
 let last = performance.now();
-let ticksSinceBroadcast = 0;
+let lastBroadcastTick = 0;
 
 // Build the per-tick step context: pull one buffered command per human player
 // (repeating their last on a gap), and compute the bot from the current world —
@@ -319,8 +319,11 @@ setInterval(() => {
 
   loop.advance(dt, buildCtx);
 
-  ticksSinceBroadcast++;
-  if (ticksSinceBroadcast >= BROADCAST_EVERY) {
+  // Pace broadcasts by *sim ticks actually run*, not timer fires: a lagging
+  // event loop makes one fire cover several ticks, and counting fires stretched
+  // the broadcast gap to 3–4 ticks — which clients (correctly) read as
+  // irregular spacing and inferred as snapshot loss.
+  if (world.tick - lastBroadcastTick >= BROADCAST_EVERY) {
     // Drain events on *broadcast*, not on *tick*. The sim runs at 100Hz but we
     // only broadcast at ~33Hz; clearing every tick (the old bug) wiped events
     // produced on the 4 in-between ticks before any snapshot could carry them,
@@ -331,6 +334,6 @@ setInterval(() => {
     // broadcast.
     broadcast();
     world.events.length = 0;
-    ticksSinceBroadcast = 0;
+    lastBroadcastTick = world.tick;
   }
 }, Math.round(TICK_DT * 1000));

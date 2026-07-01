@@ -78,8 +78,9 @@ describe("SimulatedTransport stall mode", () => {
     vi.advanceTimersByTime(149); // now = 299
     expect(inner.sent).toHaveLength(0);
 
-    // All three arrive together at the window end, FIFO.
-    vi.advanceTimersByTime(2); // past 300 (+ the tiny FIFO offsets)
+    // All three arrive together at the window end, FIFO (spread by the 1ms
+    // whole-millisecond ordering clamp — browsers truncate sub-ms delays).
+    vi.advanceTimersByTime(5); // past 300 + the per-frame FIFO spacing
     expect(inner.sent.map((s) => s.seqs[0])).toEqual([1, 2, 3]);
     for (const s of inner.sent) expect(s.at).toBeGreaterThanOrEqual(300);
   });
