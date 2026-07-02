@@ -19,7 +19,7 @@
  * the frame covers inherits that intent.
  */
 
-import { TICK_DT } from "../config";
+import { INPUT, TICK_DT } from "../config";
 import type { InputCommand } from "../sim/types";
 import type { SequencedInput } from "./protocol";
 
@@ -38,6 +38,7 @@ const MAX_FRAME = 0.25;
 const RTT_SMOOTH = 0.2;
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 export class ClientInputManager {
   private accumulator = 0;
@@ -45,6 +46,10 @@ export class ClientInputManager {
   private clientTick = 0;
   /** Un-acked commands, ascending by `seq` — the M2.4 replay buffer. */
   private pending: PendingInput[] = [];
+  /** Smoothed server-reported input-queue depth (ticks), fed one report per
+   *  snapshot by `observeServerDepth`. `null` until the first report — pacing
+   *  stays neutral until the server has told us anything (M2.17 Phase C). */
+  private depthEwma: number | null = null;
 
   /** Highest `seq` the server has acked. */
   lastAckedSeq = 0;
@@ -61,7 +66,13 @@ export class ClientInputManager {
    * the new commands (already buffered) for the caller to send.
    */
   produce(dtSeconds: number, sample: InputCommand, nowMs: number): SequencedInput[] {
-    this.accumulator += Math.min(dtSeconds, MAX_FRAME);
+    // Closed-loop pacing (M2.17 Phase C): scale how fast wall time turns into
+    // ticks so the server-side queue holds ~targetDepthTicks instead of a
+    // standing backlog (each tick of which is 10ms of added input latency) or
+    // starvation (repeat-last padding → mispredictions). Bounded to ±2%, so
+    // the production model — one seq per tick — is untouched; only the clock
+    // mapping breathes. `MAX_BUFFERED` in serverInput.ts stays as the safety net.
+    this.accumulator += Math.min(dtSeconds, MAX_FRAME) * (1 + this.paceScale);
 
     const out: SequencedInput[] = [];
     while (this.accumulator >= TICK_DT) {
@@ -91,6 +102,40 @@ export class ClientInputManager {
     }
     this.lastAckedSeq = seq;
     this.pending = this.pending.filter((p) => p.seq > seq);
+  }
+
+  /** Feed one server-reported input-queue depth (from a snapshot's
+   *  `inputBufferDepth`) into the pacing loop's EWMA. The raw value oscillates
+   *  tick-to-tick with delivery clumping; smoothing (~1s at the ~50Hz snapshot
+   *  rate) keeps the controller acting on the *standing* depth, not the noise. */
+  observeServerDepth(depth: number): void {
+    if (!INPUT.pacing.enabled) return;
+    this.depthEwma =
+      this.depthEwma === null ? depth : lerp(this.depthEwma, depth, INPUT.pacing.depthSmooth);
+  }
+
+  /** The live pacing adjustment, as a signed fraction of real time (+ = produce
+   *  faster). Proportional on the smoothed depth error, bounded to ±maxScale.
+   *  0 while pacing is disabled or before the first depth report. */
+  get paceScale(): number {
+    if (!INPUT.pacing.enabled || this.depthEwma === null) return 0;
+    const error = INPUT.pacing.targetDepthTicks - this.depthEwma;
+    return clamp(error * INPUT.pacing.gainPerTick, -INPUT.pacing.maxScale, INPUT.pacing.maxScale);
+  }
+
+  /** Sub-tick render fraction — how far real time has advanced past the last
+   *  produced tick, in [0,1) after `produce()`. Passing this to the renderer as
+   *  the lerp `alpha` (M2.17 Phase A) is what makes the *predicted* local ship —
+   *  which only advances in whole 10ms steps — move smoothly at any frame rate:
+   *  at 60fps a frame covers alternately 1 or 2 ticks, so with a hard-coded
+   *  alpha the camera advanced +10ms, +20ms, +10ms… on a uniform ~16.7ms frame
+   *  cadence and the whole scene juddered whenever the player moved. The trade:
+   *  the own ship renders up to 10ms in the past (standard fixed-timestep
+   *  interpolation — the same model M0's FixedLoop used). Baked view entities
+   *  (interpolated remotes, remote projectiles) set `prev* === current`, so a
+   *  non-1 alpha is a no-op for them by construction. */
+  get alpha(): number {
+    return this.accumulator / TICK_DT;
   }
 
   /** The client's current sim-tick count (debug overlay: client vs server tick). */

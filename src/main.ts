@@ -33,8 +33,9 @@ async function main() {
   const map = await loadMap();
 
   // 2. Create the view world — never stepped. The interpolator rebuilds it each
-  //    frame from buffered snapshots, rendering remote entities ~interpDelay in
-  //    the past so they glide instead of snapping at the ~33Hz broadcast rate.
+  //    frame from buffered snapshots. Remote ships render per NET.remoteShips:
+  //    extrapolated to the estimated server present (M2.17 D, the default) or
+  //    interpolated ~interpDelay in the past (the M2.2 fallback).
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
   // M2.8: remote players' projectiles are simulated deterministically (forward
@@ -205,6 +206,10 @@ async function main() {
       inputMgr.ack(snap.lastProcessedInputSeq, now);
     }
     serverInputDepth = snap.inputBufferDepth;
+    // M2.17 Phase C: feed the pacing loop — the client's input clock speeds
+    // up/slows down (±2%) so this depth holds ~INPUT.pacing.targetDepthTicks
+    // instead of a standing backlog or starvation.
+    inputMgr.observeServerDepth(snap.inputBufferDepth);
     latestPings = snap.pings;
   });
 
@@ -328,10 +333,12 @@ async function main() {
     // const alpha = server.advance(dt);
     // --------------------------------------------------------------------------
 
-    // Rebuild the view world from buffered snapshots: remote ships/bullets are
-    // interpolated ~interpDelay in the past (smooth); the local ship is pinned
-    // to the latest snapshot (still laggy — M2.4 adds prediction). The pose is
-    // baked in with prev*===current, so alpha is a no-op here.
+    // Rebuild the view world from buffered snapshots: remote ships are drawn
+    // per NET.remoteShips.mode — extrapolated to the estimated server present
+    // (M2.17 D) or interpolated ~interpDelay in the past (M2.2 fallback); the
+    // local ship is pinned to the latest snapshot (prediction replaces it
+    // below). The pose is baked in with prev*===current, so alpha is a no-op
+    // here.
     interp.buildView(view, now, interpMs, view.localPlayerId, NET.extrapolateMaxMs);
 
     // M2.10: drop the delayed server copy of any *own* bomb explosion we already
@@ -348,8 +355,10 @@ async function main() {
 
     // M2.4: replace the laggy snapshot-pinned local player with the predicted
     // one (reset to the last ack + replay of un-acked inputs). The camera and
-    // local ship now track the predicted pose; remotes stay interpolated. alpha
-    // is 1, so the renderer's prev→current lerp draws the predicted pose as-is.
+    // local ship now track the predicted pose; remotes stay interpolated. Its
+    // prev* fields are the genuine previous-tick pose (movementSystem records
+    // them each step), so the renderer's prev→current lerp by the real sub-tick
+    // alpha draws exact continuous motion (M2.17 Phase A).
     const predLocal = predictor.predict(inputMgr.unacked, view.localPlayerId);
     if (predLocal) {
       // M2.5: ease in any pending reconciliation correction rather than snapping.
@@ -458,7 +467,13 @@ async function main() {
       view.projectiles.push(p);
     }
 
-    renderer.draw(view, 1, dt, latestPings);
+    // M2.17 Phase A: pass the input clock's real sub-tick fraction instead of a
+    // hard-coded 1, so the predicted local ship (and with it the camera, which
+    // follows it) advances uniformly between whole 10ms sim ticks instead of
+    // juddering +1/+2 ticks per ~16.7ms frame. Everything baked by the
+    // interpolator / remote-projectile simulator has prev* === current, so this
+    // alpha only affects entities with a genuine previous-tick pose.
+    renderer.draw(view, inputMgr.alpha, dt, latestPings);
 
     // Drain events the interpolator released (in interpolated time) this frame.
     for (const e of view.events) {
@@ -544,7 +559,10 @@ async function main() {
       `srvclk off ${interp.clockOffsetMs?.toFixed(0) ?? "—"}ms\n` +
       // M2.15 upstream: datagram send rate (down from ~100/s), inputs per datagram,
       // and the redundancy depth that lets a dropped one recover without a round-trip.
-      `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}\n` +
+      // `pace` is the M2.17 closed-loop input-clock adjustment holding `in-buf` at
+      // its ~1.5-tick target.
+      `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}  ` +
+      `pace ${inputMgr.paceScale >= 0 ? "+" : ""}${(inputMgr.paceScale * 100).toFixed(1)}%\n` +
       `interp ${interpMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
       `loss ${hps.missed}/s  stale ${hps.stale}/s\n` +
       `extrap ${hps.extrapFrames}/s  freeze ${hps.freezeFrames}/s\n` +

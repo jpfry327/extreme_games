@@ -185,6 +185,41 @@ export const INPUT = {
    *  ~10 covers several lost datagrams at 60Hz; inputs are tiny so the byte cost
    *  is negligible, and the server dedups the overlap by `seq`. */
   redundantTicks: 10,
+
+  /** Closed-loop input pacing (M2.17 Phase C). The server consumes exactly one
+   *  input per tick, and nothing else drains a standing queue once one forms —
+   *  client/server clock-rate drift or clumped delivery parks a 2–6 tick backlog
+   *  that adds `depth × 10ms` to *every* subsequent input, or starves the queue
+   *  so the server pads with repeat-last (mispredictions). The M2.11 stopgap
+   *  (`MAX_BUFFERED` drop-oldest in serverInput.ts) bounds the damage lossily;
+   *  this is the principled fix its comment promised: a slow feedback loop on
+   *  the client's input-production clock, driven by the `inputBufferDepth` the
+   *  server already stamps into every snapshot. Only how wall time maps to tick
+   *  production changes — the 1:1 seq-per-tick model, the M2.4 replay, and the
+   *  server's seq-ordered consumption are indifferent to it. */
+  pacing: {
+    enabled: true,
+    /** Standing queue depth to hold (ticks). ~1.5 keeps one command always
+     *  ready (no repeat-last starvation) plus half a tick of jitter slack,
+     *  while adding only ~15ms of queue wait — the low end of the 1.5–2
+     *  sweet spot since the redundant resends already cover loss. */
+    targetDepthTicks: 1.5,
+    /** EWMA weight per depth report (one per snapshot, ~50/s). The raw depth
+     *  oscillates tick-to-tick with delivery clumping; 0.03/report halves the
+     *  error in ~23 reports ≈ 0.5s, smoothing over ~1s without making the
+     *  loop sluggish. */
+    depthSmooth: 0.03,
+    /** Proportional gain: pace change per tick of depth error. 0.01 → a 1-tick
+     *  standing error retunes the clock by 1%, draining/filling ~1 tick/second
+     *  — convergence time constant ≈ 1s, well inside stability for a loop
+     *  whose feedback arrives within ~RTT + 20ms. */
+    gainPerTick: 0.01,
+    /** Bound on the pace scale (±fraction). ±2% mirrors the tick clock's slew
+     *  bound reasoning: imperceptible as motion (the predicted ship's tick
+     *  cadence shifts by ≤0.2ms/tick) yet ±2 ticks/second of authority — plenty
+     *  to track real clock drift (crystal skew is ~±0.01%). */
+    maxScale: 0.02,
+  },
 } as const;
 
 // --- Networking (M2) ---------------------------------------------------------
@@ -219,8 +254,15 @@ export const NET = {
    *  jitter blip), so the delay itself never visibly time-warps the remote ships. */
   adaptiveInterp: {
     enabled: true,
-    /** Floor (ms): never tighter than ~2 broadcast gaps at 33Hz. */
-    minMs: 50,
+    /** Absolute floor (ms). The *effective* floor is spacing-relative —
+     *  `max(minMs, meanIntervalMs × spacingFactor)` inside `AdaptiveInterpDelay`
+     *  — so it re-derives from the measured broadcast gap (≥1.5 × the 20ms gap
+     *  at the 50Hz rate = 30ms) instead of hard-coding a rate. This value is
+     *  only the safety net under a mismeasured/absurdly small interval. History:
+     *  the old 50 was sized as "~2 gaps at 33Hz" and silently donated ~20ms of
+     *  unnecessary remote-view delay after M2.16 moved broadcasts to 50Hz
+     *  (M2.17 Phase B). */
+    minMs: 30,
     /** Ceiling (ms). 120 ≈ 4 broadcast gaps + a 60ms cushion. The old 200
      *  existed to absorb burst-inflated "jitter" that the tick clock + p90
      *  lateness no longer misread; real sustained lateness past 120ms is a
@@ -262,6 +304,38 @@ export const NET = {
     slewMaxMsPerSec: 20,
     /** Raw-vs-applied gap beyond this (ms) snaps instead of slewing. */
     snapThresholdMs: 250,
+  },
+
+  /** Remote-ship render mode (M2.17 Phase D). `"extrapolate"` draws remote ships
+   *  at the **estimated server present** — each is based on the newest snapshot
+   *  and advanced at constant velocity (walls handled with the ships' own
+   *  bounce treatment) — instead of interpolated 30–120ms in the past plus
+   *  ~RTT/2 of wire age. Subspace physics is near-ballistic (frictionless,
+   *  thrust-limited: Warbird 0.03 px/tick², afterburner 0.06, no teleports), so
+   *  a 100ms constant-velocity lead mispredicts by at most ½·a·t² ≈ 1.5–3px
+   *  against a 14px ship radius (6–12px at the 250ms stall cap) — invisible
+   *  next to the 100–170ms of staleness it removes. This is how original
+   *  Subspace drew remotes. Trades, priced in deliberately: each new snapshot
+   *  reveals the misprediction as a small pose correction (absorbed into a
+   *  decaying per-ship render offset — visible only as a gentle ease when a
+   *  ship turns hard); during a stall ships freeze at the lead cap and recover
+   *  with an eased correction. `"interpolate"` reverts to the M2.2 path
+   *  wholesale (remotes smoothed in the past) — kept as the regression
+   *  fallback. */
+  remoteShips: {
+    mode: "extrapolate" as "extrapolate" | "interpolate",
+    /** Cap (ms) on how far past its snapshot a remote ship may be advanced —
+     *  same philosophy (and value) as `remotePresent.maxLeadMs`: covers
+     *  interp-free present rendering (~RTT/2 + a broadcast gap) with margin;
+     *  during a longer stall ships freeze at the cap instead of gliding
+     *  unboundedly on stale velocity. */
+    maxLeadMs: 250,
+    /** Half-life (ms) for decaying each remote ship's correction offset (the
+     *  ReconciliationSmoother pattern, per remote player). 80 matches the local
+     *  ship's `correctionHalfLifeMs`: corrections are typically a few px per
+     *  snapshot, halved every ~5 frames at 60fps, gone within ~¼s. Corrections
+     *  past `maxSmoothDistancePx` snap (respawn/teleport rule, same as local). */
+    correctionHalfLifeMs: 80,
   },
 
   /** Present-time remote projectiles. Remote bullets/bombs are simulated forward

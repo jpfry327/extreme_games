@@ -36,6 +36,7 @@
 import { NET, TICK_DT } from "../config";
 import type { Kinematics, Player, PlayerId } from "../sim/types";
 import type { World } from "../sim/world";
+import { RemoteShipExtrapolator, type RemoteShipsConfig } from "./remoteShips";
 import type { Snapshot } from "./snapshot";
 import { ServerClock } from "./tickClock";
 
@@ -150,6 +151,17 @@ export class SnapshotInterpolator {
   /** Monotonic floor for `renderTick` — a clock snap (reconnect / tab-return)
    *  must never stamp a *smaller* lag-comp rewind target than already sent. */
   private lastRenderTick = -Infinity;
+  /** Remote-ship render mode (M2.17 Phase D). `"extrapolate"` delegates remote
+   *  players to the extrapolator below (drawn at the estimated server present);
+   *  `"interpolate"` keeps the M2.2 straddling-pair path wholesale. Injectable
+   *  for tests; defaults to the config flag. */
+  private readonly remoteShips: RemoteShipsConfig;
+  private readonly extrapolator: RemoteShipExtrapolator;
+
+  constructor(remoteShips: RemoteShipsConfig = NET.remoteShips) {
+    this.remoteShips = remoteShips;
+    this.extrapolator = new RemoteShipExtrapolator(remoteShips);
+  }
 
   /** Buffer a freshly received snapshot. `nowMs` is `performance.now()`.
    *  Callers must drop stale (out-of-order) ticks before pushing — main.ts
@@ -210,6 +222,18 @@ export class SnapshotInterpolator {
    * so this returns the newest tick — i.e. less rewind, never more.
    */
   renderTick(nowMs: number, interpDelayMs: number, extrapolateMaxMs: number): number | null {
+    // Extrapolate mode (M2.17 Phase D): remote ships are drawn at the estimated
+    // server present, so the view being aimed through IS ~the present — stamp
+    // it directly. `compTicksFor` clamps `world.tick − renderTick` to ≥0, so a
+    // slightly-ahead estimate is safe (never negative rewind). Net effect: the
+    // rewind shrinks from interp+RTT to ~RTT, and with it the victim's "dodged
+    // but still died" window. The monotonic floor still guards clock snaps.
+    if (this.remoteShips.mode === "extrapolate") {
+      const serverNow = this.clock.serverTimeMs(nowMs);
+      if (serverNow === null) return null;
+      this.lastRenderTick = Math.max(this.lastRenderTick, Math.round(serverNow / TICK_MS));
+      return this.lastRenderTick;
+    }
     const renderTime = this.renderTimeMs(nowMs, interpDelayMs);
     if (renderTime === null) return null;
     const pair = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs);
@@ -244,22 +268,38 @@ export class SnapshotInterpolator {
     const newest = this.buffer[this.buffer.length - 1];
     // Non-null: a non-empty buffer means the clock has observed a snapshot.
     const renderTime = this.renderTimeMs(nowMs, interpDelayMs)!;
-
-    // Pick the straddling snapshot pair a (older) .. b (newer). Shared with the
-    // remote-projectile simulator (M2.8) so ships and bullets agree on the window.
-    const { a, b, t, extrapMs } = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs)!;
+    const extrapolateMode = this.remoteShips.mode === "extrapolate";
 
     view.tick = newest.snap.tick;
 
-    // Convert the dead-reckoning window into sim ticks (velocities are px/tick).
-    const extrapTicks = extrapMs / (1000 * TICK_DT);
-
     // --- players -------------------------------------------------------------
-    const olderPlayers = new Map(a.snap.players.map((p) => [p.id, p]));
     view.players.clear();
-    for (const bp of b.snap.players) {
-      if (bp.id === localPlayerId) continue; // local handled below, from newest
-      view.players.set(bp.id, interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks));
+    if (extrapolateMode) {
+      // M2.17 Phase D: remote ships at the estimated server present, advanced
+      // from the newest snapshot (walls + per-ship correction smoothing live in
+      // the extrapolator) — the same timeline remote projectiles already use.
+      const serverNow = this.clock.serverTimeMs(nowMs)!;
+      const remotes = this.extrapolator.build(
+        newest.snap.players,
+        newest.snap.tick,
+        serverNow,
+        nowMs,
+        localPlayerId,
+        view.map,
+      );
+      for (const p of remotes) view.players.set(p.id, p);
+    } else {
+      // M2.2: interpolate between the straddling snapshot pair a (older) .. b
+      // (newer) — shared with the remote-projectile simulator (M2.8) so ships
+      // and bullets agree on the window. On buffer starvation, dead-reckon by
+      // `extrapMs` (converted to sim ticks — velocities are px/tick).
+      const { a, b, t, extrapMs } = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs)!;
+      const extrapTicks = extrapMs / (1000 * TICK_DT);
+      const olderPlayers = new Map(a.snap.players.map((p) => [p.id, p]));
+      for (const bp of b.snap.players) {
+        if (bp.id === localPlayerId) continue; // local handled below, from newest
+        view.players.set(bp.id, interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks));
+      }
     }
     // The local player is NOT interpolated — render it from the latest
     // authoritative snapshot (prediction overrides it in main.ts since M2.4).
@@ -281,7 +321,8 @@ export class SnapshotInterpolator {
     // event anchors to:
     //   - ship-anchored events (shipHit / shipDied / playerSpawned) wait for the
     //     interpolated render time to pass their tick — ships are drawn in the
-    //     past, so their effects must be too;
+    //     past, so their effects must be too. In extrapolate mode ships are no
+    //     longer drawn in the past, so these release promptly too (M2.17 D);
     //   - bombExploded releases immediately on arrival — remote projectiles are
     //     drawn at the estimated server *present*, so a detonation held back by
     //     ~interpDelay would fire long after its bullet visually vanished.
@@ -289,10 +330,14 @@ export class SnapshotInterpolator {
     for (const buf of this.buffer) {
       if (buf.snap.tick > this.lastPromptEventTick) {
         for (const e of buf.snap.events) {
-          if (e.type === "bombExploded") view.events.push(e);
+          if (extrapolateMode || e.type === "bombExploded") view.events.push(e);
         }
       }
-      if (buf.snap.tick > this.lastEventTick && buf.snap.tick * TICK_MS <= renderTime) {
+      if (
+        !extrapolateMode &&
+        buf.snap.tick > this.lastEventTick &&
+        buf.snap.tick * TICK_MS <= renderTime
+      ) {
         for (const e of buf.snap.events) {
           if (e.type !== "bombExploded") view.events.push(e);
         }
@@ -300,6 +345,9 @@ export class SnapshotInterpolator {
       }
     }
     this.lastPromptEventTick = newest.snap.tick;
+    // Keep the past-timeline watermark advancing in extrapolate mode so state
+    // stays coherent (the mode is fixed per session, but cheap insurance).
+    if (extrapolateMode) this.lastEventTick = Math.max(this.lastEventTick, newest.snap.tick);
   }
 }
 
