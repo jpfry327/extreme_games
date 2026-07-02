@@ -306,6 +306,38 @@ export const NET = {
     snapThresholdMs: 250,
   },
 
+  /** Remote-ship render mode (M2.17 Phase D). `"extrapolate"` draws remote ships
+   *  at the **estimated server present** — each is based on the newest snapshot
+   *  and advanced at constant velocity (walls handled with the ships' own
+   *  bounce treatment) — instead of interpolated 30–120ms in the past plus
+   *  ~RTT/2 of wire age. Subspace physics is near-ballistic (frictionless,
+   *  thrust-limited: Warbird 0.03 px/tick², afterburner 0.06, no teleports), so
+   *  a 100ms constant-velocity lead mispredicts by at most ½·a·t² ≈ 1.5–3px
+   *  against a 14px ship radius (6–12px at the 250ms stall cap) — invisible
+   *  next to the 100–170ms of staleness it removes. This is how original
+   *  Subspace drew remotes. Trades, priced in deliberately: each new snapshot
+   *  reveals the misprediction as a small pose correction (absorbed into a
+   *  decaying per-ship render offset — visible only as a gentle ease when a
+   *  ship turns hard); during a stall ships freeze at the lead cap and recover
+   *  with an eased correction. `"interpolate"` reverts to the M2.2 path
+   *  wholesale (remotes smoothed in the past) — kept as the regression
+   *  fallback. */
+  remoteShips: {
+    mode: "extrapolate" as "extrapolate" | "interpolate",
+    /** Cap (ms) on how far past its snapshot a remote ship may be advanced —
+     *  same philosophy (and value) as `remotePresent.maxLeadMs`: covers
+     *  interp-free present rendering (~RTT/2 + a broadcast gap) with margin;
+     *  during a longer stall ships freeze at the cap instead of gliding
+     *  unboundedly on stale velocity. */
+    maxLeadMs: 250,
+    /** Half-life (ms) for decaying each remote ship's correction offset (the
+     *  ReconciliationSmoother pattern, per remote player). 80 matches the local
+     *  ship's `correctionHalfLifeMs`: corrections are typically a few px per
+     *  snapshot, halved every ~5 frames at 60fps, gone within ~¼s. Corrections
+     *  past `maxSmoothDistancePx` snap (respawn/teleport rule, same as local). */
+    correctionHalfLifeMs: 80,
+  },
+
   /** Present-time remote projectiles. Remote bullets/bombs are simulated forward
    *  from the newest snapshot to the *estimated server present* (they're pure
    *  deterministic flight — no input — so this is near-exact), instead of the

@@ -33,8 +33,9 @@ async function main() {
   const map = await loadMap();
 
   // 2. Create the view world — never stepped. The interpolator rebuilds it each
-  //    frame from buffered snapshots, rendering remote entities ~interpDelay in
-  //    the past so they glide instead of snapping at the ~33Hz broadcast rate.
+  //    frame from buffered snapshots. Remote ships render per NET.remoteShips:
+  //    extrapolated to the estimated server present (M2.17 D, the default) or
+  //    interpolated ~interpDelay in the past (the M2.2 fallback).
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
   // M2.8: remote players' projectiles are simulated deterministically (forward
@@ -332,10 +333,12 @@ async function main() {
     // const alpha = server.advance(dt);
     // --------------------------------------------------------------------------
 
-    // Rebuild the view world from buffered snapshots: remote ships/bullets are
-    // interpolated ~interpDelay in the past (smooth); the local ship is pinned
-    // to the latest snapshot (still laggy — M2.4 adds prediction). The pose is
-    // baked in with prev*===current, so alpha is a no-op here.
+    // Rebuild the view world from buffered snapshots: remote ships are drawn
+    // per NET.remoteShips.mode — extrapolated to the estimated server present
+    // (M2.17 D) or interpolated ~interpDelay in the past (M2.2 fallback); the
+    // local ship is pinned to the latest snapshot (prediction replaces it
+    // below). The pose is baked in with prev*===current, so alpha is a no-op
+    // here.
     interp.buildView(view, now, interpMs, view.localPlayerId, NET.extrapolateMaxMs);
 
     // M2.10: drop the delayed server copy of any *own* bomb explosion we already
