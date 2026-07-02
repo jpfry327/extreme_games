@@ -24,16 +24,38 @@ describe("AdaptiveInterpDelay", () => {
     expect(a.ms).toBe(75);
   });
 
-  it("targets spacing + jitter, clamped to [minMs, maxMs]", () => {
+  it("targets spacing + jitter, clamped to [floor, maxMs]", () => {
     const a = new AdaptiveInterpDelay(cfg, 75);
     a.update(30, 10, 0.001); // tiny dt → target set, current barely moves
     expect(a.targetMs).toBeCloseTo(30 * 1.5 + 10 * 2, 5); // 65
 
     a.update(30, 0, 0.001);
-    expect(a.targetMs).toBe(50); // 45 → clamped up to min
+    expect(a.targetMs).toBe(50); // 45 → clamped up to the spacing floor (30*1.5)
 
     a.update(200, 100, 0.001);
     expect(a.targetMs).toBe(200); // 500 → clamped down to max
+  });
+
+  // M2.17 Phase B: the floor is spacing-relative (max(minMs, spacing×factor)),
+  // so a clean 50Hz link settles at ~30ms instead of a stale rate's hard floor.
+  it("settles near 1.5× the broadcast gap on a clean 20ms-spaced link", () => {
+    const a = new AdaptiveInterpDelay({ ...cfg, minMs: 30 }, 75);
+    for (let i = 0; i < 600; i++) a.update(20, 0, 1 / 60); // clean: zero lateness
+    expect(a.targetMs).toBeCloseTo(30, 5); // 20 × 1.5
+    expect(a.ms).toBeGreaterThanOrEqual(30);
+    expect(a.ms).toBeLessThan(35);
+  });
+
+  it("still raises the target under sustained lateness at 20ms spacing", () => {
+    const a = new AdaptiveInterpDelay({ ...cfg, minMs: 30 }, 30);
+    a.update(20, 30, 0.001); // jittery link: p90 lateness 30ms
+    expect(a.targetMs).toBeCloseTo(20 * 1.5 + 30 * 2, 5); // 90 — well above the floor
+  });
+
+  it("holds the absolute minMs floor under an absurdly small measured interval", () => {
+    const a = new AdaptiveInterpDelay({ ...cfg, minMs: 30 }, 30);
+    a.update(5, 0, 0.001); // spacing term 7.5 → absolute floor binds
+    expect(a.targetMs).toBe(30);
   });
 
   it("raises fast: one raise half-life closes half the gap", () => {

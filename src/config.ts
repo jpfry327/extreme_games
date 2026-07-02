@@ -219,8 +219,15 @@ export const NET = {
    *  jitter blip), so the delay itself never visibly time-warps the remote ships. */
   adaptiveInterp: {
     enabled: true,
-    /** Floor (ms): never tighter than ~2 broadcast gaps at 33Hz. */
-    minMs: 50,
+    /** Absolute floor (ms). The *effective* floor is spacing-relative —
+     *  `max(minMs, meanIntervalMs × spacingFactor)` inside `AdaptiveInterpDelay`
+     *  — so it re-derives from the measured broadcast gap (≥1.5 × the 20ms gap
+     *  at the 50Hz rate = 30ms) instead of hard-coding a rate. This value is
+     *  only the safety net under a mismeasured/absurdly small interval. History:
+     *  the old 50 was sized as "~2 gaps at 33Hz" and silently donated ~20ms of
+     *  unnecessary remote-view delay after M2.16 moved broadcasts to 50Hz
+     *  (M2.17 Phase B). */
+    minMs: 30,
     /** Ceiling (ms). 120 ≈ 4 broadcast gaps + a 60ms cushion. The old 200
      *  existed to absorb burst-inflated "jitter" that the tick clock + p90
      *  lateness no longer misread; real sustained lateness past 120ms is a

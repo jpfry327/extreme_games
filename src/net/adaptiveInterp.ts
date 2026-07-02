@@ -59,9 +59,24 @@ export class AdaptiveInterpDelay {
   update(meanIntervalMs: number, latenessMs: number, dtSeconds: number): void {
     if (!this.cfg.enabled || meanIntervalMs <= 0) return;
 
+    // The effective floor is spacing-relative — never tighter than
+    // `spacingFactor ×` the measured broadcast gap — with `minMs` as the
+    // absolute safety floor underneath. Deriving the floor from the live
+    // spacing makes the config self-correcting across broadcast-rate changes:
+    // the old fixed 50ms floor was sized as "~2 gaps at 33Hz" and silently
+    // donated ~20ms of unnecessary remote-view delay after the 50Hz change
+    // (M2.17 Phase B).
+    // `maxMs` outranks the spacing floor: on a badly stalled link the measured
+    // interval can exceed the ceiling, and the ceiling is the fairness bound
+    // (it caps the victim-side lag-comp rewind window) — delay can't hide a
+    // stall anyway (extrapolate/freeze handles it).
+    const floorMs = Math.min(
+      this.cfg.maxMs,
+      Math.max(this.cfg.minMs, meanIntervalMs * this.cfg.spacingFactor),
+    );
     this.target = clamp(
       meanIntervalMs * this.cfg.spacingFactor + latenessMs * this.cfg.latenessFactor,
-      this.cfg.minMs,
+      floorMs,
       this.cfg.maxMs,
     );
 
