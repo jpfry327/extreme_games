@@ -445,6 +445,77 @@ experiment later).
 
 ---
 
+### M2.17 — Responsiveness fixes: sub-tick alpha, pacing, remotes at present  ✓
+
+**Goal:** close the remaining "reads as laggy vs original Subspace" gap found in
+live testing post-M2.16 (~70ms RTT, WSS/TCP). Diagnosis: (a) a client-side
+frame-pacing bug, (b) two tuning items stranded by the 33→50Hz broadcast change,
+and (c) remote ships interpolated in the past when this game's near-ballistic
+physics supports drawing them at the present. Server CPU measured and not a
+factor (69µs/tick fully loaded, 16 players). Four phases, ordered by value ÷
+risk, each committed separately.
+
+**Scope:**
+- [x] **A — Real sub-tick render alpha (whole-scene judder fix).** `main.ts`
+      hard-coded `renderer.draw(view, 1, …)`, but the predicted local ship only
+      advances in whole 10ms ticks, so at 60fps the camera (which follows it)
+      advanced +10/+20/+10ms… per uniform ~16.7ms frame — classic fixed-timestep
+      temporal aliasing juddering the *entire scene* whenever the player moved.
+      `ClientInputManager.alpha` now exposes the accumulator remainder
+      (`accumulator / TICK_DT`, in [0,1)) and the renderer lerps `prev*→current`
+      by it. Safe by construction: the predicted ship/shots carry genuine
+      previous-tick `prev*`; every baked view entity sets `prev* === current`
+      (alpha no-op); the smoother shifts `prev*` in lockstep. Trade: the own
+      ship renders ≤10ms in the past — the M0 model, restored.
+- [x] **B — Spacing-relative adaptive-interp floor.** `adaptiveInterp.minMs = 50`
+      was "~2 gaps at 33Hz"; at the 50Hz broadcast rate the spacing term asks
+      for 30ms, so the stale floor donated ~20ms of remote-view delay on a clean
+      link. The effective floor is now `max(minMs, meanInterval × spacingFactor)`
+      (ceiling-capped by `maxMs`, the fairness bound) inside
+      `AdaptiveInterpDelay`, so a future rate change re-derives it; `minMs` 50→30
+      as the absolute safety net. Clean 20ms link settles ~30–35ms.
+- [x] **C — Closed-loop input pacing (the principled fix serverInput.ts's
+      `MAX_BUFFERED` comment promised).** The server consumes one input/tick and
+      nothing drains a standing queue: drift/clumping parks a 2–6 tick backlog
+      (+20–60ms on every input) or starves it (repeat-last → mispredictions).
+      The client's input clock now breathes ±2% (`INPUT.pacing`, mirroring the
+      tick clock's slew-bound reasoning), a proportional controller on a ~1s
+      EWMA of the snapshot-reported `inputBufferDepth`, targeting ~1.5t. The
+      1:1 seq-per-tick model is untouched — only wall-time→tick mapping changes;
+      `MAX_BUFFERED` stays as the safety net. Overlay: `pace +N.N%`.
+- [x] **D — Remote ships extrapolated to the estimated server present**
+      (`net/remoteShips.ts`, flagged `NET.remoteShips.mode`, default
+      `"extrapolate"`; `"interpolate"` reverts to the M2.2 path wholesale — the
+      pinned-mode interpolation suite is the regression guard). The
+      remote-projectile pattern (M2.16) turned on ships: base on the newest
+      snapshot, constant-velocity lead to `serverNowMs` (sub-tick fraction),
+      capped/frozen at `maxLeadMs` = 250ms during stalls. Ships add what shots
+      don't need: wall bounces via the shared `sim/collision.ts moveAndCollide`
+      (exactly `movementSystem`'s treatment), and per-ship correction smoothing
+      (ReconciliationSmoother pattern as a per-player map — absorb each new
+      snapshot's misprediction delta, decay at `correctionHalfLifeMs` = 80ms,
+      snap past `maxSmoothDistancePx`, never absorb across death/respawn).
+      Constant-velocity error is bounded by ½·a·t² ≈ 1.5–3px at a 100ms lead
+      (6–12px at the stall cap) vs a 14px ship radius. With remotes at present,
+      `renderTick` stamps ~the server present (monotonic floor kept), shrinking
+      the lag-comp rewind from interp+RTT to ~RTT — and the victim's "dodged
+      but died" window with it; ship-anchored events (`shipHit`/`shipDied`/
+      `playerSpawned`) release promptly like `bombExploded` already did.
+
+**Verified:** 163 unit tests + typecheck green (new suites: pacing controller
+convergence/bounds/drift, spacing-floor behavior, extrapolation lead/cap/freeze
+/walls, correction absorb/decay/snap, respawn pinning, present-time renderTick
+monotonicity, prompt event release; the existing interpolation suite pins
+`mode: "interpolate"` as the fallback guard). Live netsim A/B (80±30ms, stall
+300/2000) on the deployed build is the remaining hands-on check — done in a
+browser session, not reproducible headlessly here.
+
+**Out of scope:** UDP-class transport (hosting decision first — see M2.12),
+victim-authoritative hits, multi-socket striping, binary input frames,
+prediction/GC micro-optimizations.
+
+---
+
 ## M3 — Client surfaces / UI foundation
 
 **Goal:** build the bitmap-font UI toolkit and the lobby's core surfaces so it

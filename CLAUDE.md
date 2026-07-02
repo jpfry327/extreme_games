@@ -73,8 +73,8 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 ### Render / interpolation
 
 - `FixedLoop` in `sim/loop.ts` accumulates real elapsed time and drives exact 10ms sim steps.
-- The renderer runs per `requestAnimationFrame`, interpolating between `prevX/prevY/prevRotation` (previous tick) and current state using the leftover `alpha`.
-- For remote players under the multiplayer transport, this same mechanism extends to interpolating between buffered server snapshots, rendered `interpDelay` (adaptive, ~50–120ms) in the past on the **server tick timeline** (M2.16 — `snap.tick × 10ms`, mapped to the client clock by `net/tickClock.ts`, not packet arrival times).
+- The renderer runs per `requestAnimationFrame`, interpolating between `prevX/prevY/prevRotation` (previous tick) and current state using the leftover `alpha` (`ClientInputManager.alpha`, the input clock's accumulator remainder — restored in M2.17 A; the predicted own ship renders ≤10ms in the past, and baked view entities set `prev* === current` so alpha is a no-op for them).
+- For remote players under the multiplayer transport: by default (M2.17 D, `NET.remoteShips.mode = "extrapolate"`) remotes are drawn at the **estimated server present** — advanced from the newest snapshot at constant velocity with the ships' own wall-bounce treatment and per-ship correction smoothing (`net/remoteShips.ts`). The `"interpolate"` fallback is the M2.2 path: lerped between buffered snapshots, rendered `interpDelay` (adaptive, ~30–120ms) in the past on the **server tick timeline** (M2.16 — `snap.tick × 10ms`, mapped to the client clock by `net/tickClock.ts`, not packet arrival times).
 
 ## Current milestone status
 
@@ -84,7 +84,8 @@ the M2.11+ responsiveness/efficiency pass is underway. The sequence is:
 M0 ✓ → M1 ✓ → M2.0–M2.10 ✓ (full netcode model)
      → M2.11 ✓ (measure & tune) → M2.12 ✗ (UDP transport — SKIPPED) → M2.13 ✓ binary+delta
      → M2.14 ✓ AOI culling (stealth deferred to M5) → M2.15 ✓ input batching
-     → M2.16 ✓ tick-timeline netcode (deployed-TCP desync fix) → M3 (UI) → ...
+     → M2.16 ✓ tick-timeline netcode (deployed-TCP desync fix)
+     → M2.17 ✓ responsiveness fixes (sub-tick alpha, input pacing, remotes-at-present) → M3 (UI) → ...
 ```
 
 M2.14 fills the per-client `serializeSnapshotFor` seam: each client is sent only entities within
@@ -203,6 +204,28 @@ Also: netsim gained a TCP **stall mode** (`stallMs`/`stallEveryMs` — reproduce
 signature locally), the server skips broadcasts to a backpressured socket (`bufferedAmount` > 8KB)
 instead of queueing stale state, broadcasts are paced by sim ticks (not timer fires) at **50Hz**,
 and the overlay shows `late p90` + `srvclk off`.
+
+M2.17 is the **responsiveness pass** on top of M2.16 (post-deploy live testing still read as laggy
+vs original Subspace; see `docs/roadmap.md` M2.17). Four fixes, ordered by value ÷ risk:
+- **Real sub-tick render alpha** — `main.ts` hard-coded alpha 1, but the predicted ship advances
+  in whole 10ms ticks, so the camera juddered +10/+20/+10ms per uniform 60fps frame (temporal
+  aliasing). `ClientInputManager.alpha` (accumulator remainder) restores the M0 model; own ship
+  renders ≤10ms in the past; baked entities are alpha-immune by construction.
+- **Spacing-relative adaptive-interp floor** — the fixed 50ms floor ("~2 gaps at 33Hz") was the
+  binding constraint after the 50Hz change; now `max(minMs=30, meanInterval × spacingFactor)`
+  inside `AdaptiveInterpDelay`, self-correcting across rate changes. Clean link ⇒ ~30–35ms.
+- **Closed-loop input pacing** (`INPUT.pacing`) — the client's input clock breathes ±2%, a
+  proportional controller on a ~1s EWMA of the snapshot-reported `inputBufferDepth`, holding the
+  server queue at ~1.5t instead of a standing backlog (+10ms/tick on every input) or starvation
+  (repeat-last). The 1:1 seq-per-tick model is untouched; `MAX_BUFFERED` stays as the safety net.
+  Overlay: `pace +N.N%`.
+- **Remote ships at the estimated server present** (`net/remoteShips.ts`, flagged
+  `NET.remoteShips.mode`, default `"extrapolate"`; `"interpolate"` = the M2.2 path, kept as the
+  regression fallback) — the remote-projectile pattern turned on ships: newest-snapshot base,
+  constant-velocity lead capped/frozen at 250ms, wall bounces via the shared `moveAndCollide`,
+  per-ship correction smoothing (absorb/decay/snap; never across respawn). Misprediction ≤ ~3px
+  at a 100ms lead vs a 14px ship. `renderTick` stamps ~the present, so lag-comp rewind shrinks
+  from interp+RTT to ~RTT; ship-anchored events now release promptly like `bombExploded`.
 
 ## Key constraints
 
