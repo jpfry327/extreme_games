@@ -185,6 +185,41 @@ export const INPUT = {
    *  ~10 covers several lost datagrams at 60Hz; inputs are tiny so the byte cost
    *  is negligible, and the server dedups the overlap by `seq`. */
   redundantTicks: 10,
+
+  /** Closed-loop input pacing (M2.17 Phase C). The server consumes exactly one
+   *  input per tick, and nothing else drains a standing queue once one forms —
+   *  client/server clock-rate drift or clumped delivery parks a 2–6 tick backlog
+   *  that adds `depth × 10ms` to *every* subsequent input, or starves the queue
+   *  so the server pads with repeat-last (mispredictions). The M2.11 stopgap
+   *  (`MAX_BUFFERED` drop-oldest in serverInput.ts) bounds the damage lossily;
+   *  this is the principled fix its comment promised: a slow feedback loop on
+   *  the client's input-production clock, driven by the `inputBufferDepth` the
+   *  server already stamps into every snapshot. Only how wall time maps to tick
+   *  production changes — the 1:1 seq-per-tick model, the M2.4 replay, and the
+   *  server's seq-ordered consumption are indifferent to it. */
+  pacing: {
+    enabled: true,
+    /** Standing queue depth to hold (ticks). ~1.5 keeps one command always
+     *  ready (no repeat-last starvation) plus half a tick of jitter slack,
+     *  while adding only ~15ms of queue wait — the low end of the 1.5–2
+     *  sweet spot since the redundant resends already cover loss. */
+    targetDepthTicks: 1.5,
+    /** EWMA weight per depth report (one per snapshot, ~50/s). The raw depth
+     *  oscillates tick-to-tick with delivery clumping; 0.03/report halves the
+     *  error in ~23 reports ≈ 0.5s, smoothing over ~1s without making the
+     *  loop sluggish. */
+    depthSmooth: 0.03,
+    /** Proportional gain: pace change per tick of depth error. 0.01 → a 1-tick
+     *  standing error retunes the clock by 1%, draining/filling ~1 tick/second
+     *  — convergence time constant ≈ 1s, well inside stability for a loop
+     *  whose feedback arrives within ~RTT + 20ms. */
+    gainPerTick: 0.01,
+    /** Bound on the pace scale (±fraction). ±2% mirrors the tick clock's slew
+     *  bound reasoning: imperceptible as motion (the predicted ship's tick
+     *  cadence shifts by ≤0.2ms/tick) yet ±2 ticks/second of authority — plenty
+     *  to track real clock drift (crystal skew is ~±0.01%). */
+    maxScale: 0.02,
+  },
 } as const;
 
 // --- Networking (M2) ---------------------------------------------------------

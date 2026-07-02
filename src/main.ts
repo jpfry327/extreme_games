@@ -205,6 +205,10 @@ async function main() {
       inputMgr.ack(snap.lastProcessedInputSeq, now);
     }
     serverInputDepth = snap.inputBufferDepth;
+    // M2.17 Phase C: feed the pacing loop — the client's input clock speeds
+    // up/slows down (±2%) so this depth holds ~INPUT.pacing.targetDepthTicks
+    // instead of a standing backlog or starvation.
+    inputMgr.observeServerDepth(snap.inputBufferDepth);
     latestPings = snap.pings;
   });
 
@@ -552,7 +556,10 @@ async function main() {
       `srvclk off ${interp.clockOffsetMs?.toFixed(0) ?? "—"}ms\n` +
       // M2.15 upstream: datagram send rate (down from ~100/s), inputs per datagram,
       // and the redundancy depth that lets a dropped one recover without a round-trip.
-      `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}\n` +
+      // `pace` is the M2.17 closed-loop input-clock adjustment holding `in-buf` at
+      // its ~1.5-tick target.
+      `up ${inputSender.sendRateHz.toFixed(0)}/s  batch ${inputSender.lastBatchSize}  redund ${inputSender.redundancyDepth}  ` +
+      `pace ${inputMgr.paceScale >= 0 ? "+" : ""}${(inputMgr.paceScale * 100).toFixed(1)}%\n` +
       `interp ${interpMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
       `loss ${hps.missed}/s  stale ${hps.stale}/s\n` +
       `extrap ${hps.extrapFrames}/s  freeze ${hps.freezeFrames}/s\n` +
