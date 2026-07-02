@@ -59,6 +59,17 @@ describe("ClientInputManager", () => {
     expect(mgr.pendingCount).toBe(1);
   });
 
+  it("exposes the sub-tick remainder as the render alpha, always in [0,1)", () => {
+    const mgr = new ClientInputManager();
+    expect(mgr.alpha).toBe(0);
+    mgr.produce(TICK_DT * 0.6, IDLE, 0); // no tick fires — 0.6 of one remains
+    expect(mgr.alpha).toBeCloseTo(0.6);
+    mgr.produce(TICK_DT * 1.7, IDLE, 0); // 2.3 total → 2 fire, 0.3 remains
+    expect(mgr.alpha).toBeCloseTo(0.3);
+    expect(mgr.alpha).toBeGreaterThanOrEqual(0);
+    expect(mgr.alpha).toBeLessThan(1);
+  });
+
   it("estimates RTT from the acked command's send time", () => {
     const mgr = new ClientInputManager();
     mgr.produce(TICK_DT, IDLE, 1000); // seq 1 sent at t=1000

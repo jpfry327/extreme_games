@@ -93,6 +93,21 @@ export class ClientInputManager {
     this.pending = this.pending.filter((p) => p.seq > seq);
   }
 
+  /** Sub-tick render fraction — how far real time has advanced past the last
+   *  produced tick, in [0,1) after `produce()`. Passing this to the renderer as
+   *  the lerp `alpha` (M2.17 Phase A) is what makes the *predicted* local ship —
+   *  which only advances in whole 10ms steps — move smoothly at any frame rate:
+   *  at 60fps a frame covers alternately 1 or 2 ticks, so with a hard-coded
+   *  alpha the camera advanced +10ms, +20ms, +10ms… on a uniform ~16.7ms frame
+   *  cadence and the whole scene juddered whenever the player moved. The trade:
+   *  the own ship renders up to 10ms in the past (standard fixed-timestep
+   *  interpolation — the same model M0's FixedLoop used). Baked view entities
+   *  (interpolated remotes, remote projectiles) set `prev* === current`, so a
+   *  non-1 alpha is a no-op for them by construction. */
+  get alpha(): number {
+    return this.accumulator / TICK_DT;
+  }
+
   /** The client's current sim-tick count (debug overlay: client vs server tick). */
   get clientTickCount(): number {
     return this.clientTick;

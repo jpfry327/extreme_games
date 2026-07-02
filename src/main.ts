@@ -348,8 +348,10 @@ async function main() {
 
     // M2.4: replace the laggy snapshot-pinned local player with the predicted
     // one (reset to the last ack + replay of un-acked inputs). The camera and
-    // local ship now track the predicted pose; remotes stay interpolated. alpha
-    // is 1, so the renderer's prev→current lerp draws the predicted pose as-is.
+    // local ship now track the predicted pose; remotes stay interpolated. Its
+    // prev* fields are the genuine previous-tick pose (movementSystem records
+    // them each step), so the renderer's prev→current lerp by the real sub-tick
+    // alpha draws exact continuous motion (M2.17 Phase A).
     const predLocal = predictor.predict(inputMgr.unacked, view.localPlayerId);
     if (predLocal) {
       // M2.5: ease in any pending reconciliation correction rather than snapping.
@@ -458,7 +460,13 @@ async function main() {
       view.projectiles.push(p);
     }
 
-    renderer.draw(view, 1, dt, latestPings);
+    // M2.17 Phase A: pass the input clock's real sub-tick fraction instead of a
+    // hard-coded 1, so the predicted local ship (and with it the camera, which
+    // follows it) advances uniformly between whole 10ms sim ticks instead of
+    // juddering +1/+2 ticks per ~16.7ms frame. Everything baked by the
+    // interpolator / remote-projectile simulator has prev* === current, so this
+    // alpha only affects entities with a genuine previous-tick pose.
+    renderer.draw(view, inputMgr.alpha, dt, latestPings);
 
     // Drain events the interpolator released (in interpolated time) this frame.
     for (const e of view.events) {
